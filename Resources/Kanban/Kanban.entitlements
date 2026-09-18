@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Deliberately not sandboxed. The app and its widget share plain files in
+      ~/Library/Application Support/Kanban, which avoids an App Group (and therefore
+      a provisioning profile) entirely. Add com.apple.security.app-sandbox plus an
+      application-group before distributing through the App Store.
+    -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>

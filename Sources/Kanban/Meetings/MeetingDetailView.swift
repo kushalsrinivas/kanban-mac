@@ -1,0 +1,430 @@
+import SwiftUI
+
+/// Meeting results with progressive disclosure: summary open, everything else behind
+/// a header you can expand. The transcript never dominates the page.
+struct MeetingDetailView: View {
+    @Environment(\.theme) private var theme
+    @Environment(AppModel.self) private var app
+
+    let meeting: Meeting
+
+    @State private var expanded: Set<Section> = [.summary, .actionItems]
+    @State private var transcript: [TranscriptSegment] = []
+    @State private var transcriptQuery = ""
+
+    private enum Section: String, CaseIterable {
+        case summary = "SUMMARY"
+        case actionItems = "ACTION ITEMS"
+        case decisions = "DECISIONS"
+        case questions = "OPEN QUESTIONS"
+        case transcript = "TRANSCRIPT"
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                header
+
+                if let progress = app.processor.progress(for: meeting.id) {
+                    ProcessingPanel(progress: progress, meeting: meeting)
+                } else if meeting.status == .failed {
+                    failurePanel
+                } else if meeting.status == .readyToProcess || meeting.status == .localOnly {
+                    unprocessedPanel
+                }
+
+                if meeting.hasResults {
+                    section(.summary) { summaryBody }
+                    section(.actionItems, badge: badge) { SuggestionsSection(meeting: meeting) }
+                    if !meeting.decisions.isEmpty {
+                        section(.decisions, badge: String(format: "%02d", meeting.decisions.count)) {
+                            bulletList(meeting.decisions)
+                        }
+                    }
+                    if !meeting.questions.isEmpty {
+                        section(.questions, badge: String(format: "%02d", meeting.questions.count)) {
+                            bulletList(meeting.questions)
+                        }
+                    }
+                    section(.transcript, badge: meeting.durationLabel) { transcriptBody }
+                }
+            }
+            .padding(.bottom, 20)
+        }
+        .scrollIndicators(.never)
+        .onAppear(perform: loadTranscript)
+        .onChange(of: meeting.id) { _, _ in loadTranscript() }
+        .onChange(of: meeting.status) { _, new in if new == .completed { loadTranscript() } }
+    }
+
+    private var badge: String {
+        let suggested = meeting.suggestedCount
+        let added = meeting.addedCount
+        if suggested == 0 && added == 0 { return "" }
+        return added > 0 ? "\(suggested) SUGGESTED · \(added) ADDED" : "\(suggested) SUGGESTED"
+    }
+
+    // MARK: Header
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(meeting.title.uppercased())
+                    .font(Theme.display(19, weight: .medium))
+                    .tracking(-0.1)
+                    .foregroundStyle(theme.ink)
+                Spacer()
+                Menu {
+                    if meeting.awaitsUpload && app.settings.backendIsConfigured {
+                        Button("Process Now") { app.processRecording(meeting.id) }
+                    }
+                    Button("Delete Meeting") { app.deleteMeeting(meeting.id) }
+                } label: {
+                    Image(systemName: "ellipsis").font(.system(size: 10))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+            }
+
+            HStack(spacing: 6) {
+                Text(DateInput.shortLabel(meeting.startedAt))
+                Text("·")
+                Text(meeting.durationLabel)
+                if meeting.status != .completed {
+                    Text("·")
+                    Text(meeting.status.label)
+                        .foregroundStyle(meeting.status == .failed ? theme.signal : theme.inkSecondary)
+                }
+            }
+            .font(Theme.mono(10.5))
+            .tracking(0.6)
+            .foregroundStyle(theme.inkTertiary)
+
+            Rule()
+        }
+        .padding(.top, 2)
+    }
+
+    // MARK: Section chrome
+
+    @ViewBuilder
+    private func section<Content: View>(_ kind: Section, badge: String = "",
+                                        @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                if expanded.contains(kind) { expanded.remove(kind) } else { expanded.insert(kind) }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: expanded.contains(kind) ? "minus" : "plus")
+                        .font(.system(size: 8, weight: .medium))
+                        .foregroundStyle(theme.inkTertiary)
+                        .frame(width: 10)
+                    MicroLabel(kind.rawValue, color: theme.inkSecondary)
+                    Spacer()
+                    if !badge.isEmpty {
+                        Text(badge)
+                            .font(Theme.mono(9.5))
+                            .foregroundStyle(theme.inkTertiary)
+                    }
+                }
+                .padding(.vertical, 7)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Rule()
+
+            if expanded.contains(kind) {
+                content()
+                    .padding(.top, 9)
+                    .padding(.bottom, 4)
+            }
+        }
+    }
+
+    // MARK: Bodies
+
+    private var summaryBody: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if meeting.summary.isEmpty {
+                Text("No summary yet.")
+                    .font(Theme.body)
+                    .foregroundStyle(theme.inkTertiary)
+            } else {
+                Text(meeting.summary)
+                    .font(Theme.display(13))
+                    .foregroundStyle(theme.ink)
+                    .lineSpacing(2.5)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+
+            if !meeting.keyPoints.isEmpty {
+                MicroLabel("key points")
+                bulletList(meeting.keyPoints)
+            }
+
+            if !meeting.participants.isEmpty || !meeting.topics.isEmpty {
+                Rule()
+                HStack(alignment: .top, spacing: 18) {
+                    if !meeting.participants.isEmpty {
+                        VStack(alignment: .leading, spacing: 3) {
+                            MicroLabel("people")
+                            Text(meeting.participants.joined(separator: ", ").uppercased())
+                                .font(Theme.mono(10))
+                                .foregroundStyle(theme.inkSecondary)
+                        }
+                    }
+                    if !meeting.topics.isEmpty {
+                        VStack(alignment: .leading, spacing: 3) {
+                            MicroLabel("topics")
+                            Text(meeting.topics.joined(separator: ", ").uppercased())
+                                .font(Theme.mono(10))
+                                .foregroundStyle(theme.inkSecondary)
+                        }
+                    }
+                    Spacer()
+                }
+            }
+        }
+    }
+
+    private func bulletList(_ items: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                HStack(alignment: .top, spacing: 7) {
+                    Text("•")
+                        .font(Theme.mono(11))
+                        .foregroundStyle(theme.inkTertiary)
+                    Text(item)
+                        .font(Theme.body)
+                        .foregroundStyle(theme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+            }
+        }
+    }
+
+    private var transcriptBody: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if transcript.isEmpty {
+                Text("No transcript.")
+                    .font(Theme.body)
+                    .foregroundStyle(theme.inkTertiary)
+            } else {
+                HStack(spacing: 8) {
+                    MicroLabel("find")
+                    TextField("", text: $transcriptQuery,
+                              prompt: Text("search transcript")
+                                .font(Theme.mono(11)).foregroundStyle(theme.inkTertiary))
+                        .textFieldStyle(.plain)
+                        .font(Theme.mono(11))
+                        .foregroundStyle(theme.ink)
+                    Text("\(filteredTranscript.count) / \(transcript.count)")
+                        .font(Theme.mono(9.5))
+                        .monospacedDigit()
+                        .foregroundStyle(theme.inkTertiary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                    .strokeBorder(theme.line, lineWidth: Theme.Metric.hairline))
+
+                // Capped so an hour-long meeting cannot make this view expensive.
+                LazyVStack(alignment: .leading, spacing: 9) {
+                    ForEach(filteredTranscript.prefix(400)) { segment in
+                        TranscriptRow(segment: segment)
+                    }
+                }
+                if filteredTranscript.count > 400 {
+                    MicroLabel("+ \(filteredTranscript.count - 400) more segments")
+                }
+            }
+        }
+    }
+
+    private var filteredTranscript: [TranscriptSegment] {
+        let q = transcriptQuery.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return transcript }
+        return transcript.filter { $0.text.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+    }
+
+    // MARK: Status panels
+
+    private var unprocessedPanel: some View {
+        Panel {
+            VStack(alignment: .leading, spacing: 8) {
+                MicroLabel(meeting.status == .localOnly ? "saved locally" : "ready to process")
+                Text(meeting.status == .localOnly
+                     ? "This recording is kept on this Mac and has not been uploaded."
+                     : "This recording has not been processed yet.")
+                    .font(Theme.body)
+                    .foregroundStyle(theme.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if app.settings.backendIsConfigured {
+                    HStack(spacing: 6) {
+                        Button(app.sync.connection.isOnline ? "PROCESS" : "PROCESS WHEN ONLINE") {
+                            app.processRecording(meeting.id)
+                        }
+                        .buttonStyle(PanelButtonStyle(prominent: true))
+                        if !app.sync.connection.isOnline {
+                            MicroLabel("vps offline")
+                        }
+                    }
+                } else {
+                    Text("Set a VPS URL in Settings to transcribe and analyse it.")
+                        .font(Theme.mono(9.5))
+                        .foregroundStyle(theme.inkTertiary)
+                }
+            }
+        }
+    }
+
+    private var failurePanel: some View {
+        Panel {
+            VStack(alignment: .leading, spacing: 8) {
+                MicroLabel("failed", color: theme.signal)
+                Text(meeting.failureReason ?? "Processing failed.")
+                    .font(Theme.body)
+                    .foregroundStyle(theme.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                if meeting.audioFilename != nil {
+                    Button("RETRY") { app.processRecording(meeting.id) }
+                        .buttonStyle(PanelButtonStyle())
+                } else {
+                    Text("The recording was already removed, so this cannot be retried.")
+                        .font(Theme.mono(9.5))
+                        .foregroundStyle(theme.inkTertiary)
+                }
+            }
+        }
+    }
+
+    private func loadTranscript() {
+        transcript = meeting.transcript.isEmpty
+            ? app.store.transcript(for: meeting.id)
+            : meeting.transcript
+    }
+}
+
+// MARK: - Transcript row
+
+private struct TranscriptRow: View {
+    @Environment(\.theme) private var theme
+    let segment: TranscriptSegment
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(segment.timecode)
+                .font(Theme.mono(9.5))
+                .monospacedDigit()
+                .foregroundStyle(theme.inkTertiary)
+                .frame(width: 44, alignment: .leading)
+                .padding(.top, 1)
+
+            VStack(alignment: .leading, spacing: 2) {
+                if let speaker = segment.speaker, !speaker.isEmpty {
+                    Text(speaker.uppercased())
+                        .font(Theme.mono(9.5, weight: .medium))
+                        .tracking(0.7)
+                        .foregroundStyle(theme.inkSecondary)
+                }
+                Text(segment.text)
+                    .font(Theme.body)
+                    .foregroundStyle(theme.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+}
+
+// MARK: - Processing
+
+/// The pipeline checklist. Steps are ticked as the server reports them.
+struct ProcessingPanel: View {
+    @Environment(\.theme) private var theme
+    let progress: MeetingProcessor.Progress
+    let meeting: Meeting
+
+    var body: some View {
+        Panel {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    MicroLabel("processing")
+                    Spacer()
+                    Text(progress.status.label)
+                        .font(Theme.mono(10, weight: .medium))
+                        .tracking(0.8)
+                        .foregroundStyle(theme.ink)
+                }
+
+                Rule()
+
+                step("RECORDING", .completed)
+                step("UPLOAD", .uploading,
+                     trailing: progress.status == .uploading
+                        ? "\(Int(progress.uploadFraction * 100))%" : nil)
+                step("TRANSCRIPTION", .transcribing)
+                step("MEETING ANALYSIS", .analyzing)
+                step("ACTION ITEMS", .completed, isFinal: true)
+
+                if let detail = progress.detail {
+                    Text(detail)
+                        .font(Theme.mono(9.5))
+                        .foregroundStyle(theme.signal)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    /// ✓ done · ● running · ○ pending
+    private func step(_ label: String, _ stage: MeetingStatus,
+                      trailing: String? = nil, isFinal: Bool = false) -> some View {
+        let state = state(for: stage, isFinal: isFinal)
+        return HStack(spacing: 8) {
+            Text(state.glyph)
+                .font(Theme.mono(11))
+                .foregroundStyle(state.isPending ? theme.inkTertiary : theme.ink)
+                .frame(width: 10)
+            Text(label)
+                .font(Theme.mono(10.5))
+                .tracking(0.6)
+                .foregroundStyle(state.isPending ? theme.inkTertiary : theme.ink)
+            Spacer()
+            if let trailing {
+                Text(trailing)
+                    .font(Theme.mono(9.5))
+                    .monospacedDigit()
+                    .foregroundStyle(theme.inkSecondary)
+            }
+        }
+    }
+
+    private enum StepState {
+        case done, running, pending
+        var glyph: String {
+            switch self {
+            case .done: return "✓"
+            case .running: return "●"
+            case .pending: return "○"
+            }
+        }
+        var isPending: Bool { self == .pending }
+    }
+
+    private func state(for stage: MeetingStatus, isFinal: Bool) -> StepState {
+        let order: [MeetingStatus] = [.queued, .uploading, .transcribing, .analyzing, .completed]
+        let currentIndex = order.firstIndex(of: progress.status) ?? 0
+        if isFinal { return progress.status == .completed ? .done : .pending }
+        guard let stageIndex = order.firstIndex(of: stage) else { return .done }
+        if stageIndex < currentIndex { return .done }
+        if stageIndex == currentIndex { return .running }
+        return .pending
+    }
+}

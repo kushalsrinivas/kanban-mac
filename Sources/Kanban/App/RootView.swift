@@ -1,0 +1,364 @@
+import SwiftUI
+
+enum FocusTarget: Hashable {
+    case quickAdd, search, board, agent
+}
+
+struct RootView: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.colorScheme) private var colorScheme
+    @FocusState private var focus: FocusTarget?
+
+    var body: some View {
+        @Bindable var app = app
+
+        ZStack {
+            app.theme.paper.ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                TitleBar()
+                    .padding(.horizontal, Theme.Metric.gutter)
+                    .padding(.top, 6)
+
+                SectionTabs()
+                    .padding(.horizontal, Theme.Metric.gutter)
+                    .padding(.top, 10)
+
+                Group {
+                    switch app.section {
+                    case .tasks: tasksSection
+                    case .meetings: MeetingsView().padding(.top, 10)
+                    case .agent: AgentConsoleView(focus: $focus).padding(.top, 10)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                StatusFooter()
+            }
+        }
+        .environment(\.theme, app.theme)
+        .preferredColorScheme(app.settings.colorScheme)
+        .onAppear {
+            app.systemIsDark = colorScheme == .dark
+            focus = .board
+        }
+        .onChange(of: colorScheme) { _, new in app.systemIsDark = new == .dark }
+        .onChange(of: app.quickAddRequestID) { _, _ in focus = .quickAdd }
+        .onChange(of: app.isSearchActive) { _, active in focus = active ? .search : .board }
+        .overlay {
+            if app.isPaletteOpen {
+                CommandPaletteView(isPresented: $app.isPaletteOpen)
+                    .environment(\.theme, app.theme)
+            }
+        }
+        // The one modal in the app: turning an AI suggestion into a real task.
+        .overlay {
+            if let draft = app.pendingSuggestion {
+                ZStack {
+                    Rectangle()
+                        .fill(app.theme.paper.opacity(0.72))
+                        .ignoresSafeArea()
+                        .onTapGesture { app.pendingSuggestion = nil }
+                    AddTaskConfirmation(draft: draft)
+                        .id(draft.id)
+                }
+                .environment(\.theme, app.theme)
+            }
+        }
+        .onKeyPress(.upArrow) { arrow(.up) }
+        .onKeyPress(.downArrow) { arrow(.down) }
+        .onKeyPress(.leftArrow) { arrow(.left) }
+        .onKeyPress(.rightArrow) { arrow(.right) }
+        .onKeyPress(.return) {
+            guard boardHasFocus, let id = app.selection else { return .ignored }
+            app.openInspector(for: id)
+            return .handled
+        }
+        .onKeyPress(.space) {
+            guard boardHasFocus, app.selection != nil else { return .ignored }
+            app.completeSelection()
+            return .handled
+        }
+        .onKeyPress(.escape) {
+            if app.pendingSuggestion != nil { app.pendingSuggestion = nil; return .handled }
+            if app.isPaletteOpen { app.isPaletteOpen = false; return .handled }
+            if app.isSearchActive { app.toggleSearch(); focus = .board; return .handled }
+            if app.inspector != .hidden { app.closeInspector(); focus = .board; return .handled }
+            return .ignored
+        }
+        .onKeyPress(.delete) {
+            guard boardHasFocus, app.selection != nil else { return .ignored }
+            app.archiveSelection()
+            return .handled
+        }
+    }
+
+    private var boardHasFocus: Bool { focus == .board && app.section == .tasks }
+
+    // MARK: Tasks section
+
+    private var tasksSection: some View {
+        @Bindable var app = app
+        return VStack(spacing: 0) {
+            StatusPanel()
+                .padding(.horizontal, Theme.Metric.gutter)
+                .padding(.top, 10)
+
+            QuickAddBar(focus: $focus)
+                .padding(.horizontal, Theme.Metric.gutter)
+                .padding(.top, 10)
+
+            if app.isSearchActive {
+                SearchBar(focus: $focus)
+                    .padding(.horizontal, Theme.Metric.gutter)
+                    .padding(.top, 8)
+            }
+
+            HStack(spacing: 0) {
+                BoardView()
+                    .focused($focus, equals: .board)
+
+                if app.inspector != .hidden {
+                    VRule()
+                    InspectorView(focus: $focus)
+                        .frame(width: 300)
+                }
+            }
+            .padding(.top, 10)
+        }
+    }
+
+    private func arrow(_ direction: MoveCommandDirection) -> KeyPress.Result {
+        guard boardHasFocus else { return .ignored }
+        if NSEvent.modifierFlags.contains(.option), direction == .up || direction == .down {
+            app.shiftSelection(up: direction == .up)
+        } else {
+            app.moveSelectionCursor(direction)
+        }
+        return .handled
+    }
+}
+
+// MARK: - Title bar
+
+private struct TitleBar: View {
+    @Environment(\.theme) private var theme
+    @Environment(AppModel.self) private var app
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(app.section == .tasks ? "TASK SYSTEM"
+                 : app.section == .meetings ? "MEETINGS" : "AGENT")
+                .font(Theme.display(24, weight: .medium))
+                .tracking(-0.2)
+                .foregroundStyle(theme.ink)
+
+            if let message = app.transientMessage {
+                Text(message)
+                    .font(Theme.mono(9.5, weight: .medium))
+                    .tracking(0.8)
+                    .foregroundStyle(theme.inkTertiary)
+                    .padding(.bottom, 2)
+            }
+
+            Spacer(minLength: 0)
+
+            // A recording in progress follows you across every section.
+            if app.recorder.isRecording {
+                Button { app.section = .meetings } label: {
+                    HStack(spacing: 5) {
+                        Circle().fill(theme.signal).frame(width: 6, height: 6)
+                        Text(Meeting.timecode(app.recorder.elapsed))
+                            .font(Theme.mono(10, weight: .medium))
+                            .monospacedDigit()
+                            .foregroundStyle(theme.ink)
+                    }
+                }
+                .buttonStyle(PanelButtonStyle(compact: true))
+                .help("Recording — open meetings")
+            }
+
+            ConnectionBadge()
+
+            Button { app.toggleSearch() } label: {
+                Image(systemName: "magnifyingglass").font(.system(size: 10))
+            }
+            .buttonStyle(PanelButtonStyle(compact: true))
+            .help("Search (⌘F)")
+
+            Button { app.isPaletteOpen = true } label: { Text("⌘K") }
+                .buttonStyle(PanelButtonStyle(compact: true))
+                .help("Command palette")
+
+            SettingsLink {
+                Image(systemName: "slider.horizontal.3").font(.system(size: 10))
+            }
+            .buttonStyle(PanelButtonStyle(compact: true))
+            .help("Settings (⌘,)")
+        }
+        .padding(.leading, 64)   // clears the traffic lights
+    }
+}
+
+/// VPS reachability, plus anything queued while offline.
+private struct ConnectionBadge: View {
+    @Environment(\.theme) private var theme
+    @Environment(AppModel.self) private var app
+
+    var body: some View {
+        Button {
+            Task { await app.connect() }
+        } label: {
+            HStack(spacing: 5) {
+                StatusDot(dot)
+                Text(app.sync.connection.label)
+                    .font(Theme.mono(9.5, weight: .medium))
+                    .tracking(0.7)
+                    .foregroundStyle(theme.inkSecondary)
+                if app.sync.pendingCount > 0 {
+                    Text("↑\(app.sync.pendingCount)")
+                        .font(Theme.mono(9.5))
+                        .monospacedDigit()
+                        .foregroundStyle(theme.inkTertiary)
+                }
+            }
+        }
+        .buttonStyle(PanelButtonStyle(compact: true))
+        .help(helpText)
+    }
+
+    private var dot: StatusDot.State {
+        switch app.sync.connection {
+        case .online: return .on
+        case .offline: return .alert
+        case .checking: return .idle
+        case .unconfigured: return .off
+        }
+    }
+
+    private var helpText: String {
+        switch app.sync.connection {
+        case .unconfigured: return "Running locally. Set a VPS URL in Settings."
+        case .offline: return "VPS unreachable. Tasks and recording still work. Click to retry."
+        case .checking: return "Checking the connection…"
+        case .online:
+            return app.sync.pendingCount > 0
+                ? "\(app.sync.pendingCount) change(s) syncing"
+                : "Connected to your VPS"
+        }
+    }
+}
+
+// MARK: - Section tabs
+
+private struct SectionTabs: View {
+    @Environment(\.theme) private var theme
+    @Environment(AppModel.self) private var app
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(AppModel.Section.allCases, id: \.self) { section in
+                let active = app.section == section
+                Button { app.section = section } label: {
+                    HStack(spacing: 5) {
+                        Text(section.label)
+                            .font(Theme.mono(10.5, weight: active ? .semibold : .regular))
+                            .tracking(1)
+                        if let badge = badge(for: section) {
+                            Text(badge)
+                                .font(Theme.mono(9))
+                                .monospacedDigit()
+                                .foregroundStyle(active ? theme.paper.opacity(0.7) : theme.inkTertiary)
+                        }
+                    }
+                    .foregroundStyle(active ? theme.paper : theme.inkSecondary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 5)
+                    .background(active ? theme.ink : Color.clear)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer()
+        }
+        .background(theme.panelAlt)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+            .strokeBorder(theme.line, lineWidth: Theme.Metric.hairline))
+    }
+
+    private func badge(for section: AppModel.Section) -> String? {
+        switch section {
+        case .tasks:
+            let open = app.store.counts().open
+            return open > 0 ? String(format: "%02d", open) : nil
+        case .meetings:
+            let suggestions = app.openSuggestionCount
+            return suggestions > 0 ? "\(suggestions)!" : nil
+        case .agent:
+            return nil
+        }
+    }
+}
+
+// MARK: - Search
+
+private struct SearchBar: View {
+    @Environment(\.theme) private var theme
+    @Environment(AppModel.self) private var app
+    @FocusState.Binding var focus: FocusTarget?
+
+    var body: some View {
+        @Bindable var app = app
+        HStack(spacing: 8) {
+            MicroLabel("find")
+            TextField("", text: $app.searchText,
+                      prompt: Text("search titles, notes, tags")
+                        .font(Theme.mono(11)).foregroundStyle(theme.inkTertiary))
+                .textFieldStyle(.plain)
+                .font(Theme.mono(11.5))
+                .foregroundStyle(theme.ink)
+                .focused($focus, equals: .search)
+                .onSubmit { focus = .board }
+
+            Text("\(app.searchResultCount) MATCH\(app.searchResultCount == 1 ? "" : "ES")")
+                .font(Theme.mono(9.5))
+                .monospacedDigit()
+                .foregroundStyle(theme.inkTertiary)
+
+            Button { app.toggleSearch() } label: { Text("ESC") }
+                .buttonStyle(BareButtonStyle())
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+            .strokeBorder(theme.line, lineWidth: Theme.Metric.hairline))
+    }
+}
+
+// MARK: - Footer
+
+private struct StatusFooter: View {
+    @Environment(\.theme) private var theme
+    @Environment(AppModel.self) private var app
+
+    var body: some View {
+        HStack(spacing: 10) {
+            MicroLabel("⌘N NEW")
+            MicroLabel("⌘K COMMAND")
+            MicroLabel("⌘F FIND")
+            MicroLabel("⌘1-4 COLUMN")
+            MicroLabel("⌘R RECORD")
+            Spacer(minLength: 0)
+            if app.processor.isBusy {
+                MicroLabel("PROCESSING \(app.processor.active.count)")
+            }
+            MicroLabel("\(app.store.tasks.count) TASKS")
+            MicroLabel("\(app.store.meetings.count) MEETINGS")
+        }
+        .padding(.horizontal, Theme.Metric.gutter)
+        .padding(.vertical, 7)
+        .overlay(alignment: .top) { Rule() }
+    }
+}
