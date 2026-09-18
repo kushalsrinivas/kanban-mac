@@ -177,6 +177,9 @@ struct RecordingPanel: View {
                 }
                 .buttonStyle(PanelButtonStyle(prominent: true))
             }
+
+            Button("FORCE STOP") { Task { await app.recorder.forceStop() } }
+                .buttonStyle(BareButtonStyle())
         }
     }
 

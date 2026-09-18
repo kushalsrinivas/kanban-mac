@@ -62,10 +62,20 @@ more.
 Recording only ever starts because you pressed a button. There is no auto-detection and
 no background listening — the engine exists only between START and STOP.
 
-Microphone capture is AVAudioEngine; system audio is ScreenCaptureKit. Both are mixed
-through one graph into a 32 kHz mono AAC file (~28 MB/hour), with the main mixer muted
-so nothing is played back into the room. If a source is unavailable the UI says so
-rather than silently recording half the meeting.
+Microphone capture is AVAudioEngine, into a 32 kHz mono AAC file (~28 MB/hour), with
+the main mixer muted so nothing is played back into the room. If a source is
+unavailable the UI says so rather than silently recording half the meeting.
+
+**System audio is off by default**, and you probably do not need it. It exists to
+capture the *other* side of a video call — without it you record the room and your own
+voice, which is all an in-person meeting needs. Turning it on uses ScreenCaptureKit,
+which means granting Screen Recording and living with the macOS capture indicator in
+the menu bar. That is a real cost, so it is opt-in rather than assumed.
+
+Everything on the capture path runs on realtime audio threads and touches only the
+lock-protected `AudioFileWriter` — never main-actor state. STOP always tears the engine
+down even if it disagrees about whether it is running, and FORCE STOP is there as an
+unconditional escape hatch.
 
 On stop you choose: **PROCESS**, **SAVE LOCALLY**, or **DISCARD**. Nothing is uploaded
 until you pick PROCESS. If the VPS is unreachable the recording waits on disk and goes

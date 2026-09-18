@@ -134,26 +134,70 @@ final class MeetingRecorder: AudioCaptureDelegate {
         }
     }
 
+    /// Stops and always leaves the recorder in a usable state.
+    ///
+    /// This deliberately does not bail out when `isRecording` is false. If the engine
+    /// and the UI ever disagree — a failed start, a stream that died — an early
+    /// return would strand the user in a recording state with no way out. Whatever
+    /// the engine's opinion, we tear down and settle the phase.
     func stop() async {
-        guard isRecording, let meetingID = currentMeetingID else { return }
+        let meetingID = currentMeetingID
+        var result: CaptureResult?
+
         do {
-            let result = try await engine.stop()
+            result = try await engine.stop()
+        } catch {
+            // Not fatal. Force the engine down so no capture is left running.
+            await engine.cancel()
+            if isRecording {
+                lastError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            }
+        }
+
+        defer {
+            currentMeetingID = nil
+            level = 0
+            store.flush()
+        }
+
+        guard let meetingID, store.meeting(meetingID) != nil else {
+            phase = .idle
+            return
+        }
+
+        if let result, result.byteCount > 0 {
             store.updateMeeting(meetingID) {
                 $0.duration = result.duration
                 $0.status = .readyToProcess
             }
             phase = .awaitingDecision(meetingID: meetingID, duration: result.duration,
                                       bytes: result.byteCount)
-        } catch {
-            lastError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+        } else {
+            // Nothing usable was captured; do not offer to upload an empty file.
+            let reason = lastError ?? "No audio was captured."
             store.updateMeeting(meetingID) {
                 $0.status = .failed
-                $0.failureReason = self.lastError
+                $0.failureReason = reason
             }
+            lastError = reason
             phase = .idle
+        }
+    }
+
+    /// Escape hatch: tears everything down unconditionally and keeps whatever was
+    /// written. Wired to the menu bar so a wedged recording is always recoverable.
+    func forceStop() async {
+        await engine.cancel()
+        if let meetingID = currentMeetingID, store.meeting(meetingID) != nil {
+            store.updateMeeting(meetingID) {
+                $0.status = .failed
+                $0.failureReason = "Recording was stopped manually."
+            }
         }
         currentMeetingID = nil
         level = 0
+        elapsed = 0
+        phase = .idle
         store.flush()
     }
 
@@ -193,18 +237,27 @@ final class MeetingRecorder: AudioCaptureDelegate {
 
     // MARK: AudioCaptureDelegate
 
+    // These arrive from audio threads as well as the main queue, so they hop rather
+    // than assert. Asserting here is what crashed the app the moment recording began.
     nonisolated func captureDidUpdate(level: Float, elapsed: TimeInterval) {
-        MainActor.assumeIsolated {
+        Task { @MainActor in
             self.level = level
             self.elapsed = elapsed
         }
     }
 
     nonisolated func captureSourcesDidChange(_ sources: CaptureSources) {
-        MainActor.assumeIsolated { self.sources = sources }
+        Task { @MainActor in self.sources = sources }
     }
 
     nonisolated func captureDidFail(_ error: CaptureError) {
-        MainActor.assumeIsolated { self.lastError = error.errorDescription }
+        Task { @MainActor in
+            if case .systemAudioStopped = error {
+                // Not fatal: note it and keep the microphone running.
+                self.lastError = error.errorDescription
+            } else {
+                self.lastError = error.errorDescription
+            }
+        }
     }
 }

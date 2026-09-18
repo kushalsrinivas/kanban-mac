@@ -104,6 +104,11 @@ struct MenuBarView: View {
                 }
                 .buttonStyle(PanelButtonStyle(prominent: true, compact: true))
             }
+
+            // Escape hatch. If the engine ever wedges, STOP alone could leave the
+            // recording state stuck; this always tears it down.
+            Button("FORCE STOP") { Task { await app.recorder.forceStop() } }
+                .buttonStyle(BareButtonStyle())
         }
         .padding(.horizontal, 12)
         .padding(.top, 11)

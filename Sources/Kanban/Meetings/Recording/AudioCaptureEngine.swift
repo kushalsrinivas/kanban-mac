@@ -70,6 +70,9 @@ public enum CaptureError: LocalizedError {
     case alreadyRecording
     case notRecording
     case engine(String)
+    /// ScreenCaptureKit stopped — usually the user clicking "Stop Sharing" in the
+    /// menu bar. The microphone keeps recording.
+    case systemAudioStopped(String)
 
     public var errorDescription: String? {
         switch self {
@@ -85,6 +88,8 @@ public enum CaptureError: LocalizedError {
             return "No recording is running."
         case .engine(let message):
             return message
+        case .systemAudioStopped:
+            return "System audio capture stopped. The microphone is still recording."
         }
     }
 }

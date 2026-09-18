@@ -45,6 +45,10 @@ final class AppSettings {
 
     // Meetings
     var captureMicrophone: Bool { didSet { set(captureMicrophone, "captureMicrophone") } }
+    /// Off by default. Capturing the other side of a call needs ScreenCaptureKit,
+    /// which means Screen Recording permission and a capture indicator in the menu
+    /// bar. That is a lot to impose on someone who just wants to record a room, so
+    /// it is opt-in.
     var captureSystemAudio: Bool { didSet { set(captureSystemAudio, "captureSystemAudio") } }
     /// Off by default: recordings are transport artefacts, deleted once processed.
     var keepRecordings: Bool { didSet { set(keepRecordings, "keepRecordings") } }
@@ -73,7 +77,13 @@ final class AppSettings {
         confirmDestructiveAgentActions = bool("confirmDestructive", true)
         apiKey = KeychainStore.get(.apiToken) ?? ""
         captureMicrophone = bool("captureMicrophone", true)
-        captureSystemAudio = bool("captureSystemAudio", true)
+        // System audio used to default on. Reset it once for anyone carrying the old
+        // value, so nobody is stuck with a Screen Recording prompt they never wanted.
+        if !d.bool(forKey: "didResetSystemAudioDefault") {
+            d.set(false, forKey: "captureSystemAudio")
+            d.set(true, forKey: "didResetSystemAudioDefault")
+        }
+        captureSystemAudio = bool("captureSystemAudio", false)
         keepRecordings = bool("keepRecordings", false)
     }
 

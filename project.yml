@@ -79,6 +79,11 @@ targets:
     sources:
       - path: Sources/Shared
       - path: Sources/Kanban/Meetings/Recording/AudioCaptureEngine.swift
+      - path: Sources/Kanban/Meetings/Recording/AudioFileWriter.swift
+      - path: Sources/Kanban/Meetings/Recording/MeetingRecorder.swift
+      - path: Sources/Kanban/Settings/AppSettings.swift
+      - path: Sources/Kanban/Core/Authentication/KeychainStore.swift
+      - path: Sources/Kanban/Meetings/Recording/SystemAudioCaptureEngine.swift
       - path: Tests/KanbanCoreTests
     settings:
       base:
