@@ -82,6 +82,11 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
         return sources
     }
 
+    /// Prompts for anything not yet granted.
+    ///
+    /// This is the only path that registers the app with TCC. Until it runs at least
+    /// once, macOS does not list the app under Privacy & Security at all — which is
+    /// why Settings offers this explicitly rather than only reporting status.
     func requestPermissions(_ request: CaptureRequest) async -> CaptureSources {
         var sources = CaptureSources(microphone: .disabled, systemAudio: .disabled)
 
@@ -94,11 +99,16 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
             if CGPreflightScreenCaptureAccess() {
                 sources.systemAudio = .ready
             } else {
-                // Opens System Settings the first time; returns immediately after.
-                let granted = CGRequestScreenCaptureAccess()
+                // CGRequestScreenCaptureAccess blocks while the prompt is up, so it
+                // must not run on the main actor or the UI freezes behind it.
+                let granted = await withCheckedContinuation { continuation in
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        continuation.resume(returning: CGRequestScreenCaptureAccess())
+                    }
+                }
                 sources.systemAudio = granted
                     ? .ready
-                    : .unavailable("Grant Screen Recording in System Settings, then start again.")
+                    : .unavailable("Turn on Screen Recording for Kanban in System Settings, then quit and reopen the app.")
             }
         }
 

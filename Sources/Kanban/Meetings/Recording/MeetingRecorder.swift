@@ -54,6 +54,25 @@ final class MeetingRecorder: AudioCaptureDelegate {
         sources = await SystemAudioCaptureEngine.probeSources(captureRequest)
     }
 
+    /// Triggers the actual system prompts.
+    ///
+    /// macOS only lists an app under Privacy & Security once it has asked, so this
+    /// is what makes Kanban appear in the Microphone and Screen Recording lists.
+    /// Offered from Settings so permissions can be sorted out before a meeting
+    /// starts, rather than at the moment the user presses record.
+    @discardableResult
+    func requestPermissions() async -> CaptureSources {
+        lastError = nil
+        sources = await engine.requestPermissions(captureRequest)
+        return sources
+    }
+
+    /// True when something still needs granting before a recording would capture audio.
+    var needsPermission: Bool {
+        (settings.captureMicrophone && !sources.microphone.isWorking)
+            || (settings.captureSystemAudio && !sources.systemAudio.isWorking)
+    }
+
     // MARK: Control
 
     func start() async {

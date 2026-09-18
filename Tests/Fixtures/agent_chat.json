@@ -5,7 +5,7 @@
     "agenda" : [
       {
         "actionItemId" : "44444444-4444-4444-4444-444444444444",
-        "created" : "2026-09-18T05:09:00.064Z",
+        "created" : "2026-09-18T05:22:21.104Z",
         "due" : "2026-09-18T17:00:00.000Z",
         "dueToday" : true,
         "id" : "55555555-5555-5555-5555-555555555555",
@@ -19,12 +19,12 @@
         "subtasks" : [
           {
             "done" : false,
-            "id" : "653E92CC-AB8F-408A-949A-554911E99A87",
+            "id" : "F6D9773A-4685-4E6D-B426-82CBD07BC0E6",
             "title" : "build image"
           },
           {
             "done" : false,
-            "id" : "20047276-DB12-4951-95A9-1A0C20E623EB",
+            "id" : "798901AD-E16E-4F90-92B5-5E30DC7F8214",
             "title" : "run migrations"
           }
         ],
@@ -32,12 +32,12 @@
           "ops"
         ],
         "title" : "Deploy API",
-        "updated" : "2026-09-18T05:09:00.064Z"
+        "updated" : "2026-09-18T05:22:21.104Z"
       },
       {
-        "created" : "2026-09-18T05:09:00.065Z",
+        "created" : "2026-09-18T05:22:21.104Z",
         "dueToday" : false,
-        "id" : "27F5B0F7-CEC9-40B6-9940-0F9B36D48CBF",
+        "id" : "F86137AF-0F67-4652-BECB-A889E01C8D1E",
         "notes" : "",
         "overdue" : false,
         "position" : 0,
@@ -51,7 +51,7 @@
 
         ],
         "title" : "Finish CAD model",
-        "updated" : "2026-09-18T05:09:00.065Z"
+        "updated" : "2026-09-18T05:22:21.104Z"
       }
     ],
     "byStatus" : {
@@ -62,7 +62,7 @@
     },
     "doneToday" : 0,
     "dueToday" : 1,
-    "generatedAt" : "2026-09-18T05:09:00.066Z",
+    "generatedAt" : "2026-09-18T05:22:21.105Z",
     "open" : 2,
     "overdue" : 0
   },

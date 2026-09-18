@@ -104,31 +104,29 @@ struct SettingsView: View {
             row("KEEP RECORDINGS") {
                 PillToggle(isOn: app.settings.keepRecordings) { settings.keepRecordings.wrappedValue.toggle() }
             }
-            row("PERMISSIONS") {
-                HStack(spacing: 8) {
-                    permissionPill("MIC", app.recorder.sources.microphone)
-                    permissionPill("SCREEN", app.recorder.sources.systemAudio)
-                    Button("CHECK") { Task { await app.recorder.probe() } }
-                        .buttonStyle(PanelButtonStyle(compact: true))
-                    Button("OPEN SETTINGS") {
-                        NSWorkspace.shared.open(URL(string:
-                            "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
-                    }
-                    .buttonStyle(PanelButtonStyle(compact: true))
-                }
+            row("MICROPHONE ACCESS") {
+                permissionControls(
+                    state: app.recorder.sources.microphone,
+                    pane: "Privacy_Microphone",
+                    enabled: app.settings.captureMicrophone)
             }
-            row("LOCAL FILES") {
+            row("SCREEN RECORDING") {
+                permissionControls(
+                    state: app.recorder.sources.systemAudio,
+                    pane: "Privacy_ScreenCapture",
+                    enabled: app.settings.captureSystemAudio)
+            }
+            if app.recorder.needsPermission {
                 HStack(spacing: 8) {
-                    Text(ByteCountFormatter.string(fromByteCount: recordingsBytes, countStyle: .file).uppercased())
-                        .font(Theme.mono(10.5))
-                        .monospacedDigit()
-                        .foregroundStyle(theme.inkSecondary)
-                    Button("REVEAL") {
-                        KanbanPaths.ensureRecordingsDirectory()
-                        NSWorkspace.shared.activateFileViewerSelecting([KanbanPaths.recordingsDirectory])
+                    Button("GRANT ACCESS") {
+                        Task { await app.recorder.requestPermissions() }
                     }
-                    .buttonStyle(PanelButtonStyle(compact: true))
+                    .buttonStyle(PanelButtonStyle(prominent: true, compact: true))
+                    Button("RE-CHECK") { Task { await app.recorder.probe() } }
+                        .buttonStyle(PanelButtonStyle(compact: true))
                 }
+                .padding(.leading, 168)
+                note("macOS only lists an app under Privacy & Security once it has asked for the permission. Press GRANT ACCESS to ask \u{2014} that is what puts Kanban in those lists. Screen Recording also needs the app quit and reopened afterwards.")
             }
             note("Recording never starts on its own. Audio is a transport file: unless you keep originals, it is deleted once the VPS returns results.")
         }
@@ -236,12 +234,27 @@ struct SettingsView: View {
 
     // MARK: Building blocks
 
-    private func permissionPill(_ label: String, _ state: CaptureSources.State) -> some View {
-        HStack(spacing: 4) {
-            StatusDot(state.isWorking ? .on : .alert)
-            Text("\(label) \(state.label)")
-                .font(Theme.mono(9.5))
-                .foregroundStyle(state.isWorking ? theme.inkSecondary : theme.signal)
+    /// Status plus the two things you can actually do about it.
+    private func permissionControls(state: CaptureSources.State, pane: String,
+                                    enabled: Bool) -> some View {
+        HStack(spacing: 8) {
+            StatusDot(enabled ? (state.isWorking ? .on : .alert) : .off)
+            Text(enabled ? state.label : "OFF")
+                .font(Theme.mono(10.5, weight: .medium))
+                .tracking(0.6)
+                .foregroundStyle(enabled ? (state.isWorking ? theme.ink : theme.signal)
+                                         : theme.inkTertiary)
+                .frame(width: 92, alignment: .leading)
+
+            if enabled {
+                Button("OPEN SETTINGS") {
+                    // Deep-links to the specific pane; the generic one drops you on
+                    // Microphone even when it is Screen Recording that is missing.
+                    NSWorkspace.shared.open(URL(string:
+                        "x-apple.systempreferences:com.apple.preference.security?\(pane)")!)
+                }
+                .buttonStyle(PanelButtonStyle(compact: true))
+            }
         }
     }
 

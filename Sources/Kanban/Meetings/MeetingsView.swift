@@ -109,6 +109,23 @@ struct RecordingPanel: View {
                 .monospacedDigit()
                 .foregroundStyle(theme.inkTertiary)
 
+            if app.recorder.needsPermission {
+                // Asking here is what registers the app with macOS; until it has
+                // asked once it does not appear under Privacy & Security at all.
+                Button("GRANT ACCESS") {
+                    Task { await app.recorder.requestPermissions() }
+                }
+                .buttonStyle(PanelButtonStyle(prominent: true))
+                .frame(maxWidth: .infinity)
+
+                Text(app.recorder.sources.isSilent
+                     ? "Kanban needs permission before it can capture anything."
+                     : "Some audio would be missed. Grant the rest, or record with what is available.")
+                    .font(Theme.mono(9.5))
+                    .foregroundStyle(theme.inkTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Button {
                 app.startRecording()
             } label: {
@@ -118,15 +135,8 @@ struct RecordingPanel: View {
                 }
                 .frame(maxWidth: .infinity)
             }
-            .buttonStyle(PanelButtonStyle(prominent: true))
+            .buttonStyle(PanelButtonStyle(prominent: !app.recorder.needsPermission))
             .disabled(app.recorder.phase == .preparing || app.recorder.sources.isSilent)
-
-            if app.recorder.sources.isSilent {
-                Text("Nothing can be captured. Check microphone and screen-recording permissions in Settings.")
-                    .font(Theme.mono(9.5))
-                    .foregroundStyle(theme.signal)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
     }
 
