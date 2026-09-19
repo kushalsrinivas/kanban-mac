@@ -34,10 +34,19 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
         return Date().timeIntervalSince(startedAt) - pausedDuration
     }
 
-    // Audio graph
-    private let engine = AVAudioEngine()
-    private let mixer = AVAudioMixerNode()
-    private let systemPlayer = AVAudioPlayerNode()
+    /// The audio graph, rebuilt from scratch for every recording.
+    ///
+    /// Per-recording because the format is decided from whatever hardware is in front
+    /// of us at the time — see `graphFormat` — and someone can plug in a headset
+    /// between two meetings. It also means no state survives a recording that ended
+    /// badly.
+    private final class Graph {
+        let engine = AVAudioEngine()
+        let mixer = AVAudioMixerNode()
+        let systemPlayer = AVAudioPlayerNode()
+    }
+
+    private var graph: Graph?
 
     // Output — safe to touch from the audio thread.
     private let writer = AudioFileWriter()
@@ -65,7 +74,27 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
         AVEncoderBitRateKey: 64_000
     ]
 
-    private static let tapFormat = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
+    /// The format the graph runs at, decided per recording from the real hardware.
+    ///
+    /// This must match the microphone's own sample rate. An `AVAudioMixerNode` will
+    /// happily change an input's channel count, but asking it to resample an input —
+    /// a 44.1 kHz built-in mic into a 48 kHz mixer output, say — makes it emit
+    /// digital silence, with no error and a tap that keeps firing on time. A
+    /// hardcoded 48 kHz is therefore silence on every Mac whose microphone runs at
+    /// 44.1 kHz, which includes the built-in one on current laptops.
+    ///
+    /// Stereo regardless: channel conversion is the part a mixer does reliably, and
+    /// system audio arrives with two channels.
+    private static func graphFormat(inputRate: Double?) -> AVAudioFormat {
+        // 48 kHz only as the fallback when there is no microphone to follow —
+        // it is what ScreenCaptureKit produces natively.
+        let rate = inputRate.flatMap { $0 > 0 ? $0 : nil } ?? 48_000
+        return AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2)
+            ?? AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
+    }
+
+    /// The format this recording is running at, for the system-audio path to match.
+    private var tapFormat: AVAudioFormat?
 
     // MARK: - Permissions
 
@@ -140,31 +169,43 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                  withIntermediateDirectories: true)
 
+        // Build the graph, only now that permissions have been resolved, and take the
+        // format from the microphone it is actually going to open.
+        let graph = Graph()
+        self.graph = graph
+        let engine = graph.engine
+
+        var inputFormat: AVAudioFormat?
+        if resolved.microphone.isWorking {
+            let format = engine.inputNode.outputFormat(forBus: 0)
+            if format.sampleRate > 0, format.channelCount > 0 { inputFormat = format }
+        }
+        let tapFormat = Self.graphFormat(inputRate: inputFormat?.sampleRate)
+        self.tapFormat = tapFormat
+        NSLog("[Kanban] recording mic rate=%.0f ch=%u tap rate=%.0f ch=%u",
+              inputFormat?.sampleRate ?? 0, inputFormat?.channelCount ?? 0,
+              tapFormat.sampleRate, tapFormat.channelCount)
+
         do {
-            try writer.open(url: url, settings: Self.outputSettings, tapFormat: Self.tapFormat)
+            try writer.open(url: url, settings: Self.outputSettings, tapFormat: tapFormat)
         } catch {
             throw CaptureError.engine("Could not open the recording file: \(error.localizedDescription)")
         }
         outputURL = url
         meterClock.reset()
 
-        // Build the graph.
-        engine.attach(mixer)
-        engine.attach(systemPlayer)
+        engine.attach(graph.mixer)
+        engine.attach(graph.systemPlayer)
 
-        if resolved.microphone.isWorking {
-            let input = engine.inputNode
-            let inputFormat = input.outputFormat(forBus: 0)
-            if inputFormat.sampleRate > 0 {
-                engine.connect(input, to: mixer, format: inputFormat)
-                resolved.microphone = .active
-            } else {
-                resolved.microphone = .unavailable("No input device.")
-            }
+        if let inputFormat {
+            engine.connect(engine.inputNode, to: graph.mixer, format: inputFormat)
+            resolved.microphone = .active
+        } else if resolved.microphone.isWorking {
+            resolved.microphone = .unavailable("No input device.")
         }
 
-        engine.connect(systemPlayer, to: mixer, format: Self.tapFormat)
-        engine.connect(mixer, to: engine.mainMixerNode, format: Self.tapFormat)
+        engine.connect(graph.systemPlayer, to: graph.mixer, format: tapFormat)
+        engine.connect(graph.mixer, to: engine.mainMixerNode, format: tapFormat)
         engine.mainMixerNode.outputVolume = 0   // record, never monitor
 
         // This closure runs on a realtime audio thread. It must not touch the main
@@ -178,7 +219,7 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
         }
         let started = Date()
 
-        mixer.installTap(onBus: 0, bufferSize: 4096, format: Self.tapFormat) { buffer, _ in
+        graph.mixer.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { buffer, _ in
             let peak = writer.write(buffer)
             // Throttle UI updates to ~10 Hz; a 60 fps meter is wasted CPU.
             if clock.shouldPost() {
@@ -195,11 +236,11 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
             try? FileManager.default.removeItem(at: url)
             throw CaptureError.engine("Audio engine failed to start: \(error.localizedDescription)")
         }
-        systemPlayer.play()
+        graph.systemPlayer.play()
 
         if resolved.systemAudio.isWorking {
             do {
-                try await startSystemAudio(format: Self.tapFormat)
+                try await startSystemAudio(format: tapFormat)
                 resolved.systemAudio = .active
             } catch {
                 // A failure here must not kill the recording — the mic keeps going.
@@ -223,19 +264,19 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
     }
 
     func pause() throws {
-        guard isRecording, !isPaused else { throw CaptureError.notRecording }
+        guard isRecording, !isPaused, let graph else { throw CaptureError.notRecording }
         writer.setPaused(true)
-        engine.pause()
+        graph.engine.pause()
         pausedAt = Date()
         isPaused = true
     }
 
     func resume() throws {
-        guard isRecording, isPaused else { throw CaptureError.notRecording }
+        guard isRecording, isPaused, let graph else { throw CaptureError.notRecording }
         if let pausedAt { pausedDuration += Date().timeIntervalSince(pausedAt) }
         pausedAt = nil
         do {
-            try engine.start()
+            try graph.engine.start()
         } catch {
             throw CaptureError.engine("Could not resume: \(error.localizedDescription)")
         }
@@ -252,6 +293,8 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
         isRecording = false
         isPaused = false
 
+        // Read the peak before finishing: the writer clears its state on release.
+        let peak = writer.peakLevel
         // Releasing the file flushes the encoder's trailing frames.
         writer.finish()
 
@@ -259,7 +302,7 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
         outputURL = nil
         startedAt = nil
 
-        return CaptureResult(fileURL: url, duration: duration, byteCount: size ?? 0)
+        return CaptureResult(fileURL: url, duration: duration, byteCount: size, peakLevel: peak)
     }
 
     func cancel() async {
@@ -300,11 +343,18 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
 
         // Runs on the ScreenCaptureKit queue. AVAudioPlayerNode.scheduleBuffer is
         // safe to call from any thread; nothing else here touches the actor.
-        let player = systemPlayer
+        guard let player = graph?.systemPlayer else {
+            throw CaptureError.engine("The audio graph went away before system audio started.")
+        }
+        // ScreenCaptureKit is asked for the graph's format but does not have to
+        // honour it, so whatever arrives is converted to match rather than dropped.
+        // Scheduling a buffer whose format differs from the player's connection is
+        // the same silence trap the microphone just came out of.
+        streamOutput.targetFormat = format
         streamOutput.onBuffer = { buffer in
-            guard buffer.format.sampleRate == format.sampleRate,
-                  buffer.format.channelCount == format.channelCount,
-                  player.isPlaying else { return }
+            // Still checked: scheduling a buffer the player's connection does not
+            // expect raises rather than returns, and conversion can fail.
+            guard player.isPlaying, buffer.format == format else { return }
             player.scheduleBuffer(buffer, completionHandler: nil)
         }
         streamOutput.onStopped = { [weak self] reason in
@@ -329,6 +379,7 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
         guard let stream else { return }
         streamOutput.onBuffer = nil
         streamOutput.onStopped = nil
+        streamOutput.targetFormat = nil
         self.stream = nil
         // Never let a failure here strand the capture indicator in the menu bar.
         try? await stream.stopCapture()
@@ -336,13 +387,15 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
 
     // MARK: - Teardown
 
+    /// Tears the graph down and lets go of it. The next recording builds a new one.
     private func cleanupGraph() {
-        mixer.removeTap(onBus: 0)
-        systemPlayer.stop()
-        engine.stop()
-        engine.reset()
-        if engine.attachedNodes.contains(mixer) { engine.detach(mixer) }
-        if engine.attachedNodes.contains(systemPlayer) { engine.detach(systemPlayer) }
+        tapFormat = nil
+        guard let graph else { return }
+        self.graph = nil
+        graph.mixer.removeTap(onBus: 0)
+        graph.systemPlayer.stop()
+        graph.engine.stop()
+        graph.engine.reset()
     }
 
     private static func describe(_ error: Error) -> String {
@@ -390,10 +443,26 @@ private final class StreamAudioOutput: NSObject, SCStreamOutput, SCStreamDelegat
     private let lock = NSLock()
     private var _onBuffer: ((AVAudioPCMBuffer) -> Void)?
     private var _onStopped: ((String) -> Void)?
+    private var _targetFormat: AVAudioFormat?
+    /// Rebuilt whenever the incoming format changes, which in practice is once.
+    private var converter: AVAudioConverter?
+    private var converterSource: AVAudioFormat?
 
     var onBuffer: ((AVAudioPCMBuffer) -> Void)? {
         get { lock.lock(); defer { lock.unlock() }; return _onBuffer }
         set { lock.lock(); _onBuffer = newValue; lock.unlock() }
+    }
+
+    /// What the audio graph expects. Buffers are resampled into it when they differ.
+    var targetFormat: AVAudioFormat? {
+        get { lock.lock(); defer { lock.unlock() }; return _targetFormat }
+        set {
+            lock.lock()
+            _targetFormat = newValue
+            converter = nil
+            converterSource = nil
+            lock.unlock()
+        }
     }
 
     var onStopped: ((String) -> Void)? {
@@ -439,7 +508,42 @@ private final class StreamAudioOutput: NSObject, SCStreamOutput, SCStreamDelegat
             destination[channel].update(from: source.assumingMemoryBound(to: Float.self), count: count)
         }
 
-        handler(buffer)
+        handler(convertIfNeeded(buffer))
+    }
+
+    /// Resamples into the graph's format. Returns the buffer untouched when it
+    /// already matches, which is the usual case.
+    private func convertIfNeeded(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let target = _targetFormat, buffer.format != target else { return buffer }
+
+        if converter == nil || converterSource != buffer.format {
+            converter = AVAudioConverter(from: buffer.format, to: target)
+            converterSource = buffer.format
+        }
+        guard let converter else { return buffer }
+
+        let ratio = target.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
+        guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else {
+            return buffer
+        }
+        output.frameLength = 0
+
+        var consumed = false
+        var error: NSError?
+        converter.convert(to: output, error: &error) { _, status in
+            if consumed {
+                status.pointee = .noDataNow
+                return nil
+            }
+            consumed = true
+            status.pointee = .haveData
+            return buffer
+        }
+        return (error == nil && output.frameLength > 0) ? output : buffer
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {

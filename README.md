@@ -66,6 +66,19 @@ Microphone capture is AVAudioEngine, into a 32 kHz mono AAC file (~28 MB/hour), 
 the main mixer muted so nothing is played back into the room. If a source is
 unavailable the UI says so rather than silently recording half the meeting.
 
+**The graph runs at the microphone's own sample rate**, decided per recording, and that
+is not a detail. An `AVAudioMixerNode` will change an input's channel count happily, but
+ask it to *resample* an input — a 44.1 kHz built-in mic feeding a 48 kHz mixer output —
+and it emits digital silence: no error, no warning, and a tap that keeps firing on time
+for the full length of the meeting. A hardcoded 48 kHz tap format is therefore silence
+on every Mac whose microphone runs at 44.1 kHz, which includes the built-in one. System
+audio gets the same treatment from the other side: ScreenCaptureKit is asked for the
+graph's format and whatever it actually delivers is resampled to match rather than
+dropped.
+
+As a backstop, `AudioFileWriter` tracks the peak across the whole recording, and a file
+with no signal anywhere in it is flagged rather than sent off to transcribe nothing.
+
 **System audio is off by default**, and you probably do not need it. It exists to
 capture the *other* side of a video call — without it you record the room and your own
 voice, which is all an in-person meeting needs. Turning it on uses ScreenCaptureKit,
@@ -77,10 +90,20 @@ lock-protected `AudioFileWriter` — never main-actor state. STOP always tears t
 down even if it disagrees about whether it is running, and FORCE STOP is there as an
 unconditional escape hatch.
 
-On stop you choose: **PROCESS**, **SAVE LOCALLY**, or **DISCARD**. Nothing is uploaded
-until you pick PROCESS. If the VPS is unreachable the recording waits on disk and goes
-up when the connection returns. Once results come back the audio file is deleted, unless
-you turn on "keep recordings".
+Stopping saves the recording to `~/Library/Application Support/Kanban/Recordings` and
+sends it to the VPS for transcription, without a second press. If the VPS is unreachable
+the recording waits on disk and goes up when the connection returns. The audio is kept
+after processing; turn off "keep recordings" to treat it as a transport file and reclaim
+the space instead.
+
+Turn off **AUTO UPLOAD** in Settings and nothing leaves this Mac until you press PROCESS
+on a specific recording — per meeting, "Keep Local Only" does the same thing.
+
+Deleting a meeting deletes it everywhere: the audio file, the local row and its
+transcript, and the copy on the VPS. The server delete is queued rather than sent
+directly, so deleting while offline still lands once the connection returns. "Delete
+Recording File" drops just the audio and keeps the notes, and Settings can clear every
+saved recording at once (skipping anything still waiting to upload).
 
 `AudioCaptureEngine` is a protocol, so chunked streaming can replace file-then-upload
 without touching the meeting flow.

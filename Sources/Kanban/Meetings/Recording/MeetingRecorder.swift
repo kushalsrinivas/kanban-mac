@@ -15,15 +15,30 @@ final class MeetingRecorder: AudioCaptureDelegate {
         case preparing
         case recording
         case paused
-        /// Stopped, waiting for the user to choose PROCESS or SAVE LOCALLY.
-        case awaitingDecision(meetingID: UUID, duration: TimeInterval, bytes: Int64)
+    }
+
+    /// What a finished recording left behind. Returned from `stop()` so the caller
+    /// can file it and start the upload without re-reading the store.
+    struct Finished: Equatable {
+        var meetingID: UUID
+        var duration: TimeInterval
+        var bytes: Int64
+        /// Not one non-zero sample was captured — see `CaptureResult.isSilent`.
+        var wasSilent: Bool
     }
 
     private(set) var phase: Phase = .idle
+    /// The most recent recording, kept so the panel can show what just happened.
+    private(set) var lastFinished: Finished?
     private(set) var sources = CaptureSources(microphone: .ready, systemAudio: .ready)
     private(set) var level: Float = 0
     private(set) var elapsed: TimeInterval = 0
     private(set) var lastError: String?
+    /// Shown live while recording when the tap delivers only zeroes. macOS hands
+    /// out silence rather than an error for a muted / wrong / volume-0 input, so
+    /// without this the panel reads ACTIVE while nothing arrives.
+    private(set) var noSignalHint: String?
+    private var silentSince: TimeInterval?
     /// The meeting row being recorded into, so the menu bar and widget can show it.
     private(set) var currentMeetingID: UUID?
 
@@ -79,6 +94,7 @@ final class MeetingRecorder: AudioCaptureDelegate {
         guard phase == .idle else { return }
         phase = .preparing
         lastError = nil
+        lastFinished = nil
 
         let meetingID = UUID()
         let startedAt = Date()
@@ -110,6 +126,8 @@ final class MeetingRecorder: AudioCaptureDelegate {
         currentMeetingID = meetingID
         sources = engine.sources
         elapsed = 0
+        noSignalHint = nil
+        silentSince = nil
         phase = .recording
         store.flush(recording: .init(title: resolvedTitle, startedAt: startedAt))
     }
@@ -140,7 +158,11 @@ final class MeetingRecorder: AudioCaptureDelegate {
     /// and the UI ever disagree — a failed start, a stream that died — an early
     /// return would strand the user in a recording state with no way out. Whatever
     /// the engine's opinion, we tear down and settle the phase.
-    func stop() async {
+    ///
+    /// The recording is kept on disk either way. Returns what was captured so the
+    /// caller can hand it to the processor; `nil` means there is nothing to upload.
+    @discardableResult
+    func stop() async -> Finished? {
         let meetingID = currentMeetingID
         var result: CaptureResult?
 
@@ -157,22 +179,16 @@ final class MeetingRecorder: AudioCaptureDelegate {
         defer {
             currentMeetingID = nil
             level = 0
+            noSignalHint = nil
+            silentSince = nil
+            phase = .idle
+            title = ""
             store.flush()
         }
 
-        guard let meetingID, store.meeting(meetingID) != nil else {
-            phase = .idle
-            return
-        }
+        guard let meetingID, store.meeting(meetingID) != nil else { return nil }
 
-        if let result, result.byteCount > 0 {
-            store.updateMeeting(meetingID) {
-                $0.duration = result.duration
-                $0.status = .readyToProcess
-            }
-            phase = .awaitingDecision(meetingID: meetingID, duration: result.duration,
-                                      bytes: result.byteCount)
-        } else {
+        guard let result, result.byteCount > 0 else {
             // Nothing usable was captured; do not offer to upload an empty file.
             let reason = lastError ?? "No audio was captured."
             store.updateMeeting(meetingID) {
@@ -180,8 +196,36 @@ final class MeetingRecorder: AudioCaptureDelegate {
                 $0.failureReason = reason
             }
             lastError = reason
-            phase = .idle
+            return nil
         }
+
+        // A capture path that fails tends to fail silently rather than loudly: a muted
+        // or misrouted input, or a mixer quietly refusing a format, all produce a
+        // full-length file of zeroes. That is far more likely than a genuinely silent
+        // room, so say so instead of sending it off to transcribe nothing.
+        let silenceNote = result.isSilent ? Self.silenceAdvice(sources) : nil
+
+        store.updateMeeting(meetingID) {
+            $0.duration = result.duration
+            $0.status = .readyToProcess
+            $0.failureReason = silenceNote
+        }
+        if let silenceNote { lastError = silenceNote }
+
+        let finished = Finished(meetingID: meetingID, duration: result.duration,
+                                bytes: result.byteCount, wasSilent: result.isSilent)
+        lastFinished = finished
+        return finished
+    }
+
+    /// What to tell someone whose recording came out as pure silence.
+    private static func silenceAdvice(_ sources: CaptureSources) -> String {
+        sources.microphone.isWorking
+            ? "No audio was detected, though the microphone reported itself as recording. "
+                + "Check that the right input is picked in System Settings › Sound › Input, "
+                + "that it is not muted, and that Kanban is allowed under Privacy & Security › "
+                + "Microphone."
+            : "No audio was detected: nothing was capturing."
     }
 
     /// Escape hatch: tears everything down unconditionally and keeps whatever was
@@ -197,16 +241,15 @@ final class MeetingRecorder: AudioCaptureDelegate {
         currentMeetingID = nil
         level = 0
         elapsed = 0
+        noSignalHint = nil
+        silentSince = nil
         phase = .idle
         store.flush()
     }
 
     /// Discards the recording entirely, including the file.
     func discard() async {
-        let meetingID = currentMeetingID ?? {
-            if case .awaitingDecision(let id, _, _) = phase { return id }
-            return nil
-        }()
+        let meetingID = currentMeetingID ?? lastFinished?.meetingID
         await engine.cancel()
         if let meetingID {
             if let filename = store.meeting(meetingID)?.audioFilename {
@@ -215,25 +258,17 @@ final class MeetingRecorder: AudioCaptureDelegate {
             store.deleteMeeting(meetingID)
         }
         currentMeetingID = nil
+        lastFinished = nil
         phase = .idle
         level = 0
         elapsed = 0
+        noSignalHint = nil
+        silentSince = nil
         store.flush()
     }
 
-    /// The user chose SAVE LOCALLY: keep the audio, never upload it.
-    func keepLocal() {
-        guard case .awaitingDecision(let meetingID, _, _) = phase else { return }
-        store.updateMeeting(meetingID) { $0.status = .localOnly }
-        phase = .idle
-        title = ""
-    }
-
-    /// Clears the decision prompt after the caller has kicked off processing.
-    func acknowledgeDecision() {
-        phase = .idle
-        title = ""
-    }
+    /// Clears the summary of the last recording from the panel.
+    func clearLastFinished() { lastFinished = nil }
 
     // MARK: AudioCaptureDelegate
 
@@ -243,6 +278,20 @@ final class MeetingRecorder: AudioCaptureDelegate {
         Task { @MainActor in
             self.level = level
             self.elapsed = elapsed
+            // macOS delivers zeroes — not errors — for a muted, volume-0, or wrong
+            // input, so a flat meter while ACTIVE is the only live signal. ~10 Hz
+            // updates, 5 s grace for a quiet room before saying anything.
+            if self.phase == .recording, self.sources.microphone.isWorking {
+                if level > 0.001 {
+                    self.silentSince = nil
+                    self.noSignalHint = nil
+                } else {
+                    if self.silentSince == nil { self.silentSince = elapsed }
+                    else if elapsed - (self.silentSince ?? elapsed) > 5, self.noSignalHint == nil {
+                        self.noSignalHint = Self.silenceAdvice(self.sources)
+                    }
+                }
+            }
         }
     }
 

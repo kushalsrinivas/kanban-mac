@@ -19,6 +19,7 @@ final class RecorderStateTests: XCTestCase {
         var startError: CaptureError?
         var stopError: CaptureError?
         var bytes: Int64 = 4096
+        var peak: Float = 0.6
         private(set) var cancelCount = 0
         private(set) var startedURL: URL?
 
@@ -46,7 +47,7 @@ final class RecorderStateTests: XCTestCase {
             }
             isRecording = false
             return CaptureResult(fileURL: startedURL ?? URL(fileURLWithPath: "/dev/null"),
-                                 duration: 42, byteCount: bytes)
+                                 duration: 42, byteCount: bytes, peakLevel: peak)
         }
 
         func cancel() async {
@@ -77,20 +78,40 @@ final class RecorderStateTests: XCTestCase {
         XCTAssertNotNil(store.meetings.first?.audioFilename)
     }
 
-    func testStopOffersTheProcessDecision() async {
+    func testStopSavesTheRecordingAndReportsIt() async {
         let (store, _, recorder) = makeRecorder()
         await recorder.start()
         let id = recorder.currentMeetingID!
-        await recorder.stop()
 
-        guard case .awaitingDecision(let meetingID, let duration, let bytes) = recorder.phase else {
-            return XCTFail("expected the PROCESS / SAVE LOCALLY decision, got \(recorder.phase)")
-        }
-        XCTAssertEqual(meetingID, id)
-        XCTAssertEqual(duration, 42)
-        XCTAssertGreaterThan(bytes, 0)
-        XCTAssertEqual(store.meeting(id)?.status, .readyToProcess)
+        let finished = await recorder.stop()
+
+        let result = try? XCTUnwrap(finished)
+        XCTAssertEqual(result?.meetingID, id)
+        XCTAssertEqual(result?.duration, 42)
+        XCTAssertEqual(result?.bytes, 4096)
+        XCTAssertEqual(result?.wasSilent, false)
+        XCTAssertEqual(recorder.phase, .idle, "stopping no longer asks anything")
+        XCTAssertEqual(recorder.lastFinished, finished)
+        XCTAssertEqual(store.meeting(id)?.status, .readyToProcess,
+                       "the recording is kept and queued for the VPS on its own")
+        XCTAssertNil(store.meeting(id)?.failureReason)
         XCTAssertNil(recorder.currentMeetingID)
+    }
+
+    func testStopFlagsARecordingThatCapturedOnlySilence() async {
+        let (store, engine, recorder) = makeRecorder()
+        engine.peak = 0
+        await recorder.start()
+        let id = recorder.currentMeetingID!
+
+        let finished = await recorder.stop()
+
+        XCTAssertEqual(finished?.wasSilent, true,
+                       "macOS hands out silence rather than an error when it blocks a mic")
+        XCTAssertEqual(store.meeting(id)?.status, .readyToProcess,
+                       "the file is still kept — the user decides whether to transcribe it")
+        XCTAssertNotNil(store.meeting(id)?.failureReason, "and it says why it is empty")
+        XCTAssertNotNil(recorder.lastError)
     }
 
     // MARK: The wedge cases
@@ -147,10 +168,11 @@ final class RecorderStateTests: XCTestCase {
         await recorder.start()
         let id = recorder.currentMeetingID!
 
-        await recorder.stop()
+        let finished = await recorder.stop()
 
-        XCTAssertEqual(recorder.phase, .idle,
-                       "an empty recording must not reach the PROCESS prompt")
+        XCTAssertNil(finished, "an empty file must never be handed to the uploader")
+        XCTAssertEqual(recorder.phase, .idle)
+        XCTAssertNil(recorder.lastFinished)
         XCTAssertEqual(store.meeting(id)?.status, .failed)
     }
 
@@ -182,6 +204,24 @@ final class RecorderStateTests: XCTestCase {
         XCTAssertEqual(recorder.phase, .paused)
         recorder.resume()
         XCTAssertEqual(recorder.phase, .recording)
+    }
+
+    // MARK: Live no-signal hint
+
+    func testNoSignalHintAppearsAfterSustainedSilence() async {
+        let (_, _, recorder) = makeRecorder()
+        await recorder.start()
+
+        for t in [0.0, 1.0, 2.0, 3.0, 4.0, 6.5] {
+            recorder.captureDidUpdate(level: 0, elapsed: t)
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertNotNil(recorder.noSignalHint, "ACTIVE with 5s+ of zeroes must say so live")
+
+        recorder.captureDidUpdate(level: 0.5, elapsed: 7)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertNil(recorder.noSignalHint, "signal returning must clear the hint")
     }
 
     // MARK: Delegate callbacks from other threads

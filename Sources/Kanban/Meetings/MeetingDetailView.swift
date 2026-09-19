@@ -11,6 +11,7 @@ struct MeetingDetailView: View {
     @State private var expanded: Set<Section> = [.summary, .actionItems]
     @State private var transcript: [TranscriptSegment] = []
     @State private var transcriptQuery = ""
+    @State private var confirmingDelete = false
 
     private enum Section: String, CaseIterable {
         case summary = "SUMMARY"
@@ -52,6 +53,7 @@ struct MeetingDetailView: View {
             .padding(.bottom, 20)
         }
         .scrollIndicators(.never)
+        .deleteMeetingConfirmation(meeting, isPresented: $confirmingDelete)
         .onAppear(perform: loadTranscript)
         .onChange(of: meeting.id) { _, _ in loadTranscript() }
         .onChange(of: meeting.status) { _, new in if new == .completed { loadTranscript() } }
@@ -75,10 +77,7 @@ struct MeetingDetailView: View {
                     .foregroundStyle(theme.ink)
                 Spacer()
                 Menu {
-                    if meeting.awaitsUpload && app.settings.backendIsConfigured {
-                        Button("Process Now") { app.processRecording(meeting.id) }
-                    }
-                    Button("Delete Meeting") { app.deleteMeeting(meeting.id) }
+                    MeetingActions(meeting: meeting, confirmingDelete: $confirmingDelete)
                 } label: {
                     Image(systemName: "ellipsis").font(.system(size: 10))
                 }
@@ -259,8 +258,8 @@ struct MeetingDetailView: View {
             VStack(alignment: .leading, spacing: 8) {
                 MicroLabel(meeting.status == .localOnly ? "saved locally" : "ready to process")
                 Text(meeting.status == .localOnly
-                     ? "This recording is kept on this Mac and has not been uploaded."
-                     : "This recording has not been processed yet.")
+                     ? "This recording is kept on this Mac and will not be uploaded."
+                     : "This recording is saved on this Mac and has not been transcribed yet.")
                     .font(Theme.body)
                     .foregroundStyle(theme.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -5,13 +5,13 @@
     "agenda" : [
       {
         "actionItemId" : "44444444-4444-4444-4444-444444444444",
-        "created" : "2026-09-18T05:32:10.967Z",
+        "created" : "2026-09-19T06:35:03.436Z",
         "due" : "2026-09-18T17:00:00.000Z",
-        "dueToday" : true,
+        "dueToday" : false,
         "id" : "55555555-5555-5555-5555-555555555555",
         "meetingId" : "33333333-3333-3333-3333-333333333333",
         "notes" : "ship the agent bridge",
-        "overdue" : false,
+        "overdue" : true,
         "position" : 0,
         "priority" : "urgent",
         "source" : "meeting",
@@ -19,12 +19,12 @@
         "subtasks" : [
           {
             "done" : false,
-            "id" : "76A59EBA-0FCA-4A5B-8E3D-A6CD19A52CF8",
+            "id" : "CF15837F-2E45-46BE-9866-4BF257E2CA78",
             "title" : "build image"
           },
           {
             "done" : false,
-            "id" : "A4D2546D-0892-4868-9F1A-44BD150A0BEB",
+            "id" : "370C9B4F-8767-4096-8945-5085BDD211E1",
             "title" : "run migrations"
           }
         ],
@@ -32,12 +32,12 @@
           "ops"
         ],
         "title" : "Deploy API",
-        "updated" : "2026-09-18T05:32:10.967Z"
+        "updated" : "2026-09-19T06:35:03.436Z"
       },
       {
-        "created" : "2026-09-18T05:32:10.968Z",
+        "created" : "2026-09-19T06:35:03.436Z",
         "dueToday" : false,
-        "id" : "7FA837CC-EE3E-45F5-A0E7-44B6C6F57680",
+        "id" : "1BD24E6A-3916-4E8C-A440-970742EAB781",
         "notes" : "",
         "overdue" : false,
         "position" : 0,
@@ -51,7 +51,7 @@
 
         ],
         "title" : "Finish CAD model",
-        "updated" : "2026-09-18T05:32:10.968Z"
+        "updated" : "2026-09-19T06:35:03.436Z"
       }
     ],
     "byStatus" : {
@@ -61,10 +61,10 @@
       "todo" : 1
     },
     "doneToday" : 0,
-    "dueToday" : 1,
-    "generatedAt" : "2026-09-18T05:32:10.969Z",
+    "dueToday" : 0,
+    "generatedAt" : "2026-09-19T06:35:03.437Z",
     "open" : 2,
-    "overdue" : 0
+    "overdue" : 1
   },
   "history" : [
     {

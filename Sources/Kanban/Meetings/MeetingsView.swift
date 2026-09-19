@@ -57,11 +57,7 @@ struct RecordingPanel: View {
                 HStack {
                     MicroLabel("meeting")
                     Spacer()
-                    if case .awaitingDecision = app.recorder.phase {
-                        MicroLabel("stopped")
-                    } else {
-                        MicroLabel(app.recorder.isRecording ? "live" : "ready")
-                    }
+                    MicroLabel(app.recorder.isRecording ? "live" : "ready")
                 }
 
                 Rule()
@@ -71,8 +67,11 @@ struct RecordingPanel: View {
                     idleState(recorder: recorder)
                 case .recording, .paused:
                     activeState
-                case .awaitingDecision(let id, let duration, let bytes):
-                    decisionState(meetingID: id, duration: duration, bytes: bytes)
+                }
+
+                if let finished = app.recorder.lastFinished, !app.recorder.isRecording {
+                    Rule()
+                    lastRecording(finished)
                 }
 
                 Rule()
@@ -160,6 +159,13 @@ struct RecordingPanel: View {
                 .foregroundStyle(theme.ink)
                 .contentTransition(.identity)
 
+            if let hint = app.recorder.noSignalHint {
+                Text(hint)
+                    .font(Theme.mono(9.5))
+                    .foregroundStyle(theme.signal)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             HStack(spacing: 6) {
                 Button(app.recorder.phase == .paused ? "RESUME" : "PAUSE") {
                     app.recorder.phase == .paused ? app.recorder.resume() : app.recorder.pause()
@@ -183,55 +189,51 @@ struct RecordingPanel: View {
         }
     }
 
-    private func decisionState(meetingID: UUID, duration: TimeInterval, bytes: Int64) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("PROCESS MEETING?")
-                .font(Theme.display(14, weight: .medium))
-                .foregroundStyle(theme.ink)
+    /// What happened to the recording that just stopped. It is already saved and,
+    /// unless that was turned off, already on its way to the VPS — so this reports
+    /// rather than asks, and offers the one thing still worth deciding: keeping it.
+    private func lastRecording(_ finished: MeetingRecorder.Finished) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                MicroLabel("last recording")
+                Spacer()
+                Text(ByteCountFormatter.string(fromByteCount: finished.bytes, countStyle: .file)
+                    .uppercased())
+                    .font(Theme.mono(9.5))
+                    .foregroundStyle(theme.inkTertiary)
+            }
 
-            Text("Your \(Meeting.durationLabel(duration).lowercased()) recording is ready. "
-                 + "Nothing leaves this Mac until you choose.")
-                .font(Theme.body)
-                .foregroundStyle(theme.inkSecondary)
+            Text(summary(for: finished))
+                .font(Theme.mono(10))
+                .foregroundStyle(finished.wasSilent ? theme.signal : theme.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            HStack {
-                MicroLabel("size")
-                Spacer()
-                Text(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file).uppercased())
-                    .font(Theme.mono(10.5))
-                    .foregroundStyle(theme.inkSecondary)
-            }
-
-            VStack(spacing: 6) {
-                Button("PROCESS") { app.processRecording(meetingID) }
-                    .buttonStyle(PanelButtonStyle(prominent: true))
-                    .frame(maxWidth: .infinity)
-                    .disabled(!app.settings.backendIsConfigured)
-
-                Button("SAVE LOCALLY") {
-                    app.recorder.keepLocal()
-                    app.selectedMeeting = meetingID
+            HStack(spacing: 6) {
+                Button("OPEN") { app.openMeeting(finished.meetingID) }
+                    .buttonStyle(PanelButtonStyle(compact: true))
+                if app.store.meeting(finished.meetingID)?.awaitsUpload == true,
+                   app.settings.backendIsConfigured {
+                    Button("PROCESS") { app.processRecording(finished.meetingID) }
+                        .buttonStyle(PanelButtonStyle(compact: true))
                 }
-                .buttonStyle(PanelButtonStyle())
-                .frame(maxWidth: .infinity)
-
-                Button("DISCARD") { Task { await app.recorder.discard() } }
+                Spacer()
+                Button("DELETE") { app.deleteMeeting(finished.meetingID) }
                     .buttonStyle(BareButtonStyle())
             }
-
-            if !app.settings.backendIsConfigured {
-                Text("No VPS configured, so processing is unavailable. The recording is kept.")
-                    .font(Theme.mono(9.5))
-                    .foregroundStyle(theme.inkTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if !app.sync.connection.isOnline {
-                Text("VPS offline. Choose PROCESS and it will upload when the connection returns.")
-                    .font(Theme.mono(9.5))
-                    .foregroundStyle(theme.inkTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
+    }
+
+    private func summary(for finished: MeetingRecorder.Finished) -> String {
+        let length = Meeting.durationLabel(finished.duration)
+        if finished.wasSilent {
+            return "\(length) recorded, but no audio was detected. Saved anyway."
+        }
+        guard app.settings.autoUpload, app.settings.backendIsConfigured else {
+            return "\(length) saved to this Mac."
+        }
+        return app.sync.connection.isOnline
+            ? "\(length) saved and sent for transcription."
+            : "\(length) saved. It uploads when the VPS is reachable."
     }
 
     // MARK: Sources
@@ -373,6 +375,7 @@ private struct MeetingRow: View {
     let meeting: Meeting
 
     @State private var hovering = false
+    @State private var confirmingDelete = false
 
     private var isSelected: Bool { app.selectedMeeting == meeting.id }
 
@@ -424,8 +427,9 @@ private struct MeetingRow: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .contextMenu {
-            Button("Delete Meeting") { app.deleteMeeting(meeting.id) }
+            MeetingActions(meeting: meeting, confirmingDelete: $confirmingDelete)
         }
+        .deleteMeetingConfirmation(meeting, isPresented: $confirmingDelete)
     }
 
     private var timeLabel: String {
@@ -433,5 +437,71 @@ private struct MeetingRow: View {
         df.locale = Locale(identifier: "en_US_POSIX")
         df.dateFormat = Calendar.current.isDateInToday(meeting.startedAt) ? "HH:mm" : "EEE"
         return df.string(from: meeting.startedAt).uppercased()
+    }
+}
+
+// MARK: - Meeting actions
+
+/// The same menu wherever a meeting can be acted on: the list and the detail header.
+struct MeetingActions: View {
+    @Environment(AppModel.self) private var app
+    let meeting: Meeting
+    @Binding var confirmingDelete: Bool
+
+    var body: some View {
+        if meeting.awaitsUpload && app.settings.backendIsConfigured {
+            Button("Process Now") { app.processRecording(meeting.id) }
+        }
+        if meeting.status == .readyToProcess {
+            Button("Keep Local Only") { app.keepMeetingLocal(meeting.id) }
+        }
+        if meeting.audioFilename != nil {
+            Button("Reveal Recording in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting(
+                    [KanbanPaths.recordingURL(filename: meeting.audioFilename!)])
+            }
+            // Useful once the notes are back: the audio is the bulky part, and the
+            // meeting itself is worth keeping.
+            Button("Delete Recording File") { app.deleteRecordingAudio(meeting.id) }
+                .disabled(meeting.awaitsUpload)
+        }
+        Divider()
+        Button("Delete Meeting", role: .destructive) { confirmingDelete = true }
+    }
+}
+
+extension View {
+    /// Deleting a meeting takes the audio and the VPS copy with it, so it asks first.
+    func deleteMeetingConfirmation(_ meeting: Meeting, isPresented: Binding<Bool>) -> some View {
+        modifier(DeleteMeetingConfirmation(meeting: meeting, isPresented: isPresented))
+    }
+}
+
+private struct DeleteMeetingConfirmation: ViewModifier {
+    @Environment(AppModel.self) private var app
+    let meeting: Meeting
+    @Binding var isPresented: Bool
+
+    func body(content: Content) -> some View {
+        content.confirmationDialog(
+            "Delete \(meeting.title)?",
+            isPresented: $isPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Everywhere", role: .destructive) { app.deleteMeeting(meeting.id) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(detail)
+        }
+    }
+
+    private var detail: String {
+        var parts = ["The notes and transcript go with it."]
+        if meeting.audioFilename != nil { parts.append("The recording is deleted from this Mac.") }
+        if meeting.remoteID != nil && app.settings.backendIsConfigured {
+            parts.append("The copy on the VPS is deleted too.")
+        }
+        parts.append("This cannot be undone.")
+        return parts.joined(separator: " ")
     }
 }

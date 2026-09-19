@@ -61,6 +61,22 @@ public struct CaptureResult: Sendable {
     public var fileURL: URL
     public var duration: TimeInterval
     public var byteCount: Int64
+    /// Loudest sample seen anywhere in the recording.
+    ///
+    /// Exactly zero means the file is digital silence. macOS does not report a
+    /// blocked microphone as an error — it hands out buffers of zeroes — so this is
+    /// the only way to tell a quiet room from a mic that was never really open.
+    public var peakLevel: Float
+
+    public init(fileURL: URL, duration: TimeInterval, byteCount: Int64, peakLevel: Float) {
+        self.fileURL = fileURL
+        self.duration = duration
+        self.byteCount = byteCount
+        self.peakLevel = peakLevel
+    }
+
+    /// True when not one non-zero sample was captured.
+    public var isSilent: Bool { peakLevel <= 0 }
 }
 
 public enum CaptureError: LocalizedError {

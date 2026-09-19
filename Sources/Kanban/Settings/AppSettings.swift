@@ -38,10 +38,25 @@ final class AppSettings {
     var requestTimeout: Double { didSet { set(requestTimeout, "requestTimeout") } }
     var confirmDestructiveAgentActions: Bool { didSet { set(confirmDestructiveAgentActions, "confirmDestructive") } }
 
-    /// Stored in the login Keychain, not in UserDefaults.
+    /// Stored in the login Keychain, not in UserDefaults, and read on first use
+    /// rather than in `init`.
+    ///
+    /// A keychain read can put a modal "allow access" dialog on screen: the item's ACL
+    /// names the binary that created it, and a locally-signed build gets a new identity
+    /// on every rebuild, so the system asks again. Doing that from `init` hangs the app
+    /// before it has a window — and the test suite before it has a test.
     var apiKey: String {
-        didSet { KeychainStore.set(apiKey, for: .apiToken) }
+        get {
+            if loadedAPIKey == nil { loadedAPIKey = KeychainStore.get(.apiToken) ?? "" }
+            return loadedAPIKey ?? ""
+        }
+        set {
+            loadedAPIKey = newValue
+            KeychainStore.set(newValue, for: .apiToken)
+        }
     }
+
+    private var loadedAPIKey: String?
 
     // Meetings
     var captureMicrophone: Bool { didSet { set(captureMicrophone, "captureMicrophone") } }
@@ -50,11 +65,14 @@ final class AppSettings {
     /// bar. That is a lot to impose on someone who just wants to record a room, so
     /// it is opt-in.
     var captureSystemAudio: Bool { didSet { set(captureSystemAudio, "captureSystemAudio") } }
-    /// Off by default: recordings are transport artefacts, deleted once processed.
+    /// On by default: a recording is the only copy of what was said, so it stays on
+    /// this Mac after the VPS has finished with it. Turn it off to treat recordings
+    /// as transport files and reclaim the space automatically.
     var keepRecordings: Bool { didSet { set(keepRecordings, "keepRecordings") } }
-    /// Manual means nothing uploads until the user presses PROCESS. There is no
-    /// automatic mode, and this is deliberately not a toggle.
-    let uploadPolicy = "MANUAL"
+    /// On by default: stopping a recording saves it here and sends it to the VPS for
+    /// transcription without another press. Turn it off and audio only ever leaves
+    /// this Mac when PROCESS is pressed on a specific recording.
+    var autoUpload: Bool { didSet { set(autoUpload, "autoUpload") } }
 
     private init() {
         let d = UserDefaults.standard
@@ -75,7 +93,6 @@ final class AppSettings {
         serverURL = string("serverURL", "")
         requestTimeout = double("requestTimeout", 20)
         confirmDestructiveAgentActions = bool("confirmDestructive", true)
-        apiKey = KeychainStore.get(.apiToken) ?? ""
         captureMicrophone = bool("captureMicrophone", true)
         // System audio used to default on. Reset it once for anyone carrying the old
         // value, so nobody is stuck with a Screen Recording prompt they never wanted.
@@ -84,7 +101,8 @@ final class AppSettings {
             d.set(true, forKey: "didResetSystemAudioDefault")
         }
         captureSystemAudio = bool("captureSystemAudio", false)
-        keepRecordings = bool("keepRecordings", false)
+        keepRecordings = bool("keepRecordings", true)
+        autoUpload = bool("autoUpload", true)
     }
 
     private func set(_ value: Any, _ key: String) { defaults.set(value, forKey: key) }

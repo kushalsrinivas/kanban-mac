@@ -330,13 +330,34 @@ final class AppModel {
         Task { await recorder.start() }
     }
 
+    /// Stops, keeps the audio on this Mac, and sends it for transcription.
+    ///
+    /// Both halves happen without another press: the file is already on disk by the
+    /// time the engine stops, and the upload starts here. Turning off AUTO UPLOAD in
+    /// Settings leaves the recording local until PROCESS is pressed.
     func stopRecording() {
-        Task { await recorder.stop() }
+        Task {
+            guard let finished = await recorder.stop() else { return }
+            section = .meetings
+            selectedMeeting = finished.meetingID
+
+            if finished.wasSilent {
+                // Transcribing silence costs minutes and returns nothing. Keep the
+                // file, say what happened, and leave PROCESS available.
+                flash("SAVED · NO AUDIO DETECTED")
+                return
+            }
+            guard settings.autoUpload, settings.backendIsConfigured else {
+                flash("RECORDING SAVED LOCALLY")
+                return
+            }
+            processor.process(finished.meetingID)
+            flash(sync.connection.isOnline ? "SAVED · UPLOADING" : "SAVED · UPLOADS WHEN ONLINE")
+        }
     }
 
     /// The user chose PROCESS on a finished recording.
     func processRecording(_ meetingID: UUID) {
-        recorder.acknowledgeDecision()
         selectedMeeting = meetingID
         guard settings.backendIsConfigured else {
             flash("NO VPS CONFIGURED · SAVED LOCALLY")
@@ -346,13 +367,67 @@ final class AppModel {
         processor.process(meetingID)
     }
 
+    /// Keeps this recording on this Mac and never uploads it.
+    func keepMeetingLocal(_ meetingID: UUID) {
+        processor.cancel(meetingID)
+        store.updateMeeting(meetingID) { $0.status = .localOnly }
+        flash("KEPT LOCAL")
+    }
+
+    // MARK: Deleting
+
+    /// Removes a meeting everywhere: the audio file, the local row, and the VPS copy.
+    ///
+    /// The server delete is queued rather than sent directly, so deleting while
+    /// offline still reaches the VPS once the connection returns instead of leaving a
+    /// meeting behind that only exists there.
     func deleteMeeting(_ id: UUID) {
-        if let filename = store.meeting(id)?.audioFilename {
-            try? FileManager.default.removeItem(at: KanbanPaths.recordingURL(filename: filename))
+        guard let meeting = store.meeting(id) else { return }
+        processor.cancel(id)
+        deleteRecordingFile(for: meeting)
+        if settings.backendIsConfigured, let remoteID = meeting.remoteID {
+            store.enqueue(kind: "meeting.delete", method: "DELETE",
+                          path: "/meetings/\(remoteID)", entityID: id)
         }
         store.deleteMeeting(id)
         if selectedMeeting == id { selectedMeeting = nil }
+        if recorder.lastFinished?.meetingID == id { recorder.clearLastFinished() }
         flash("MEETING DELETED")
+    }
+
+    /// Drops the audio file but keeps the meeting and everything the VPS returned.
+    func deleteRecordingAudio(_ id: UUID) {
+        guard let meeting = store.meeting(id), meeting.audioFilename != nil else { return }
+        deleteRecordingFile(for: meeting)
+        store.updateMeeting(id) { $0.audioFilename = nil }
+        flash("RECORDING FILE DELETED")
+    }
+
+    /// Clears every audio file on disk, leaving the meetings themselves alone.
+    /// Anything still waiting to upload is skipped — that would lose the only copy.
+    @discardableResult
+    func deleteAllRecordingFiles() -> Int {
+        var removed = 0
+        for meeting in store.meetings where meeting.audioFilename != nil && !meeting.awaitsUpload {
+            deleteRecordingFile(for: meeting)
+            store.updateMeeting(meeting.id) { $0.audioFilename = nil }
+            removed += 1
+        }
+        // Sweep anything orphaned by an earlier crash or a deleted row.
+        let known = Set(store.meetings.compactMap(\.audioFilename))
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: KanbanPaths.recordingsDirectory, includingPropertiesForKeys: nil)) ?? []
+        for file in files where !known.contains(file.lastPathComponent) {
+            try? FileManager.default.removeItem(at: file)
+            removed += 1
+        }
+        flash("DELETED \(removed) RECORDING\(removed == 1 ? "" : "S")")
+        return removed
+    }
+
+    private func deleteRecordingFile(for meeting: Meeting) {
+        guard let filename = meeting.audioFilename else { return }
+        try? FileManager.default.removeItem(at: KanbanPaths.recordingURL(filename: filename))
     }
 
     // MARK: Suggested tasks

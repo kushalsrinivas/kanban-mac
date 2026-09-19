@@ -22,6 +22,10 @@ final class AudioFileWriter: @unchecked Sendable {
     private var paused = false
     private(set) var frameCount: AVAudioFramePosition = 0
 
+    /// Loudest sample written so far. Read once at the end of a recording to tell
+    /// "nobody spoke" apart from "the microphone was never really open".
+    private var peak: Float = 0
+
     // MARK: Lifecycle
 
     /// Opens the destination. `tapFormat` is what the engine will hand us.
@@ -34,6 +38,7 @@ final class AudioFileWriter: @unchecked Sendable {
         self.converter = AVAudioConverter(from: tapFormat, to: file.processingFormat)
         self.frameCount = 0
         self.paused = false
+        self.peak = 0
     }
 
     /// Releasing the file is what flushes the encoder's trailing frames.
@@ -57,6 +62,13 @@ final class AudioFileWriter: @unchecked Sendable {
         return paused
     }
 
+    /// Peak across everything that actually reached the file.
+    var peakLevel: Float {
+        lock.lock()
+        defer { lock.unlock() }
+        return peak
+    }
+
     // MARK: Hot path
 
     /// Called from the audio thread for every buffer. Returns the peak level so the
@@ -69,6 +81,7 @@ final class AudioFileWriter: @unchecked Sendable {
         defer { lock.unlock() }
 
         guard !paused, let file, let converter else { return peak }
+        self.peak = max(self.peak, peak)
 
         let ratio = file.processingFormat.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024

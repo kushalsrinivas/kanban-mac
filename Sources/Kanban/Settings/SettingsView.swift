@@ -6,6 +6,7 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var app
 
     @State private var recordingsBytes: Int64 = 0
+    @State private var confirmingRecordingPurge = false
 
     var body: some View {
         let bindable = Bindable(app.settings)
@@ -27,6 +28,19 @@ struct SettingsView: View {
         .environment(\.theme, app.theme)
         .preferredColorScheme(app.settings.colorScheme)
         .onAppear { recordingsBytes = KanbanPaths.recordingsByteCount() }
+        .confirmationDialog("Delete every saved recording?",
+                            isPresented: $confirmingRecordingPurge,
+                            titleVisibility: .visible) {
+            Button("Delete Recordings", role: .destructive) {
+                app.deleteAllRecordingFiles()
+                recordingsBytes = KanbanPaths.recordingsByteCount()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The meetings, their notes and their transcripts are kept — only the audio "
+                 + "files are deleted. Anything still waiting to upload is left alone. "
+                 + "This cannot be undone.")
+        }
     }
 
     // MARK: Blocks
@@ -93,16 +107,29 @@ struct SettingsView: View {
                     Task { await app.recorder.probe() }
                 }
             }
-            row("UPLOAD FOR TRANSCRIPTION") {
-                // Not a toggle on purpose. Audio only ever leaves this Mac when the
-                // user presses PROCESS on a specific recording.
-                Text(app.settings.uploadPolicy)
-                    .font(Theme.mono(10.5, weight: .medium))
-                    .tracking(0.8)
-                    .foregroundStyle(theme.ink)
+            row("AUTO UPLOAD") {
+                PillToggle(isOn: app.settings.autoUpload) { settings.autoUpload.wrappedValue.toggle() }
             }
             row("KEEP RECORDINGS") {
                 PillToggle(isOn: app.settings.keepRecordings) { settings.keepRecordings.wrappedValue.toggle() }
+            }
+            row("RECORDINGS ON DISK") {
+                HStack(spacing: 8) {
+                    Text(ByteCountFormatter.string(fromByteCount: recordingsBytes, countStyle: .file)
+                        .uppercased())
+                        .font(Theme.mono(10.5))
+                        .monospacedDigit()
+                        .foregroundStyle(theme.inkSecondary)
+                        .frame(width: 70, alignment: .leading)
+                    Button("REVEAL") {
+                        NSWorkspace.shared.activateFileViewerSelecting(
+                            [KanbanPaths.ensureRecordingsDirectory()])
+                    }
+                    .buttonStyle(PanelButtonStyle(compact: true))
+                    Button("DELETE ALL") { confirmingRecordingPurge = true }
+                        .buttonStyle(PanelButtonStyle(compact: true))
+                        .disabled(recordingsBytes == 0)
+                }
             }
             row("MICROPHONE ACCESS") {
                 permissionControls(
@@ -128,7 +155,7 @@ struct SettingsView: View {
                 .padding(.leading, 168)
                 note("macOS only lists an app under Privacy & Security once it has asked for the permission. Press GRANT ACCESS to ask \u{2014} that is what puts Kanban in those lists. Screen Recording also needs the app quit and reopened afterwards.")
             }
-            note("Recording never starts on its own. Audio is a transport file: unless you keep originals, it is deleted once the VPS returns results.")
+            note("Recording never starts on its own. With AUTO UPLOAD on, stopping a recording saves it to this Mac and sends it to the VPS for transcription; with it off, audio only leaves this Mac when you press PROCESS. KEEP RECORDINGS decides whether the audio survives once the VPS has returned results.")
         }
     }
 
