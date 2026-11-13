@@ -17,7 +17,6 @@ final class AppModel {
     enum Inspector: Equatable {
         case hidden
         case task(UUID)
-        case agent
     }
 
     // Dependencies
@@ -47,6 +46,8 @@ final class AppModel {
     var transientMessage: String?
     /// Suggestion the user is confirming before it becomes a task.
     var pendingSuggestion: SuggestionDraft?
+    /// Task awaiting an explicit delete confirmation. Set by the inspector and menu.
+    var deletionRequest: UUID?
 
     @ObservationIgnored private var transientWorkItem: DispatchWorkItem?
 
@@ -77,7 +78,13 @@ final class AppModel {
                                                           suggestions: meeting.suggestedCount)
             }
         }
-        agent.onTasksChanged = { [weak self] in self?.flash("AGENT UPDATED THE BOARD") }
+        agent.onTasksChanged = { [weak self] applied in
+            guard let self else { return }
+            self.flash("AGENT UPDATED THE BOARD")
+            if applied > 0, self.settings.notifyOnAgentAction {
+                self.notifications.notifyAgentAction(count: applied)
+            }
+        }
     }
 
     var theme: Theme {
@@ -140,6 +147,15 @@ final class AppModel {
             // Never lose a recording to a quit: stop cleanly and keep the file.
             Task { await recorder.stop() }
         }
+    }
+
+    /// The terminal path used by `applicationShouldTerminate`: it waits for the
+    /// recorder to finalise the file before the process exits.
+    func shutdownAndWait() async {
+        if recorder.isRecording {
+            await recorder.stop()
+        }
+        store.flush()
     }
 
     func setNotifications(enabled: Bool) {
@@ -217,15 +233,6 @@ final class AppModel {
         inspector = .task(id)
     }
 
-    func toggleAgentPanel() {
-        if case .agent = inspector {
-            inspector = selection.map { Inspector.task($0) } ?? .hidden
-        } else {
-            inspector = .agent
-            Task { await sync.refreshConnection() }
-        }
-    }
-
     func closeInspector() { inspector = .hidden }
 
     func focus(status: TaskStatus) {
@@ -241,34 +248,78 @@ final class AppModel {
 
     func moveSelection(to status: TaskStatus) {
         guard let id = selection else { return }
-        try? taskService.move(id, to: status, index: 0)
-        focusedStatus = status
-        flash("MOVED TO \(status.label)")
+        do {
+            try taskService.move(id, to: status, index: 0)
+            focusedStatus = status
+            flash("MOVED TO \(status.label)")
+        } catch {
+            flash("COULD NOT MOVE TASK")
+        }
     }
 
     func completeSelection() {
         guard let id = selection, let task = store.task(id) else { return }
-        if task.isDone {
-            try? taskService.reopen(id)
-            flash("REOPENED")
-        } else {
-            try? taskService.complete(id)
-            flash("COMPLETED")
+        do {
+            if task.isDone {
+                try taskService.reopen(id)
+                flash("REOPENED")
+            } else {
+                try taskService.complete(id)
+                flash("COMPLETED")
+            }
+        } catch {
+            flash("COULD NOT UPDATE TASK")
         }
     }
 
     func archiveSelection() {
         guard let id = selection, let task = store.task(id) else { return }
-        selectNeighbour(of: id)
-        try? taskService.delete(id, hard: false)
-        flash("ARCHIVED \(task.title.uppercased().prefix(24))")
+        let next = neighbour(of: id)
+        do {
+            try taskService.delete(id, hard: false)
+            selection = next
+            if next == nil, case .task = inspector { inspector = .hidden }
+            flash("ARCHIVED \(task.title.uppercased().prefix(24))")
+        } catch {
+            flash("COULD NOT ARCHIVE TASK")
+        }
     }
 
     func deleteSelection() {
-        guard let id = selection else { return }
-        selectNeighbour(of: id)
-        try? taskService.delete(id, hard: true)
-        flash("DELETED")
+        guard let id = selection, store.task(id) != nil else { return }
+        let next = neighbour(of: id)
+        do {
+            try taskService.delete(id, hard: true)
+            selection = next
+            if next == nil, case .task = inspector { inspector = .hidden }
+            flash("DELETED")
+        } catch {
+            flash("COULD NOT DELETE TASK")
+        }
+    }
+
+    /// Destructive delete is always asked about first, wherever it is triggered.
+    func requestDelete(_ id: UUID) {
+        selection = id
+        deletionRequest = id
+    }
+
+    func confirmDeletion() {
+        guard deletionRequest != nil else { return }
+        deletionRequest = nil
+        deleteSelection()
+    }
+
+    /// Permanently removes every archived task, locally and on the VPS. Kept out of
+    /// LocalStore because that has no knowledge of the outbox.
+    @discardableResult
+    func purgeArchived() -> Int {
+        var removed = 0
+        for id in store.tasks.filter(\.isArchived).map(\.id) {
+            do { try taskService.delete(id, hard: true); removed += 1 }
+            catch { /* keep going: one bad row must not block the rest */ }
+        }
+        return removed
     }
 
     func moveSelectionCursor(_ direction: MoveCommandDirection) {
@@ -305,17 +356,14 @@ final class AppModel {
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         let target = up ? index - 1 : index + 2
         guard target >= 0, target <= items.count else { return }
-        try? taskService.move(id, to: task.status, index: target)
+        _ = try? taskService.move(id, to: task.status, index: target)
     }
 
-    private func selectNeighbour(of id: UUID) {
-        guard let task = store.task(id) else { return }
+    private func neighbour(of id: UUID) -> UUID? {
+        guard let task = store.task(id) else { return nil }
         let items = tasks(in: task.status)
-        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
-        let neighbour = index + 1 < items.count ? items[index + 1] : (index > 0 ? items[index - 1] : nil)
-        selection = neighbour?.id
-        if let neighbour, case .task = inspector { inspector = .task(neighbour.id) }
-        else if neighbour == nil, case .task = inspector { inspector = .hidden }
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return nil }
+        return index + 1 < items.count ? items[index + 1].id : (index > 0 ? items[index - 1].id : nil)
     }
 
     // MARK: Meetings
@@ -337,7 +385,10 @@ final class AppModel {
     /// Settings leaves the recording local until PROCESS is pressed.
     func stopRecording() {
         Task {
-            guard let finished = await recorder.stop() else { return }
+            guard let finished = await recorder.stop() else {
+                flash("NOTHING WAS RECORDED")
+                return
+            }
             section = .meetings
             selectedMeeting = finished.meetingID
 
@@ -506,6 +557,7 @@ final class AppModel {
         guard url.scheme == "kanban" else { return }
         NSApp.activate(ignoringOtherApps: true)
         switch url.host {
+        case "open": section = .tasks
         case "new": newTask()
         case "agent": section = .agent
         case "record": section = .meetings
@@ -531,6 +583,10 @@ final class AppModel {
 
     func flash(_ message: String) {
         transientMessage = message
+        // VoiceOver users otherwise get no feedback for complete/archive/errors.
+        NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested,
+                             userInfo: [.announcement: message,
+                                        .priority: NSAccessibilityPriorityLevel.medium.rawValue])
         transientWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in self?.transientMessage = nil }
         transientWorkItem = item

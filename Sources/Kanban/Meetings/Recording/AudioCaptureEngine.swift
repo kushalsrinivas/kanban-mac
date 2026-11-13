@@ -142,6 +142,61 @@ public protocol AudioCaptureEngine: AnyObject {
     func pause() throws
     func resume() throws
     func stop() async throws -> CaptureResult
+    /// Stops capture and flushes the writer, but keeps the partial file.
+    ///
+    /// Used when `stop()` failed or the user forced a wedged recording to end: whatever
+    /// reached disk is recoverable, and deleting it would lose the meeting.
+    func closeKeepingFile() async
     /// Stops and deletes the partial file.
     func cancel() async
+}
+
+/// Elapsed recording time that stops while paused.
+///
+/// Shared by the main actor (`elapsed`) and the audio thread's meter posts, so it takes
+/// its own lock. The time is passed in rather than read from `Date()` inside, which
+/// makes the pause arithmetic testable without waiting on a wall clock.
+final class ElapsedClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var startedAt: Date?
+    private var pausedAt: Date?
+    private var paused: TimeInterval = 0
+
+    func start(at date: Date = Date()) {
+        lock.lock()
+        startedAt = date
+        pausedAt = nil
+        paused = 0
+        lock.unlock()
+    }
+
+    func pause(at date: Date = Date()) {
+        lock.lock()
+        if startedAt != nil, pausedAt == nil { pausedAt = date }
+        lock.unlock()
+    }
+
+    func resume(at date: Date = Date()) {
+        lock.lock()
+        if let pausedAt {
+            paused += date.timeIntervalSince(pausedAt)
+            self.pausedAt = nil
+        }
+        lock.unlock()
+    }
+
+    func reset() {
+        lock.lock()
+        startedAt = nil
+        pausedAt = nil
+        paused = 0
+        lock.unlock()
+    }
+
+    func elapsed(at date: Date = Date()) -> TimeInterval {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let startedAt else { return 0 }
+        return max(0, (pausedAt ?? date).timeIntervalSince(startedAt) - paused)
+    }
 }

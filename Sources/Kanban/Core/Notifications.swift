@@ -80,13 +80,4 @@ final class NotificationCenterBridge {
         center.add(UNNotificationRequest(identifier: "agent-\(UUID().uuidString)",
                                          content: content, trigger: nil))
     }
-
-    func notifyConfirmationNeeded(summary: String) {
-        let content = UNMutableNotificationContent()
-        content.title = "Agent needs confirmation"
-        content.body = summary
-        content.threadIdentifier = "kanban.agent"
-        center.add(UNNotificationRequest(identifier: "agent-confirm-\(UUID().uuidString)",
-                                         content: content, trigger: nil))
-    }
 }

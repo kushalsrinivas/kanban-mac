@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 // MARK: - Tasks
@@ -155,15 +156,6 @@ public struct MoveBody: Codable, Sendable {
     }
 }
 
-public struct SubtaskBody: Codable, Sendable {
-    public var title: String?
-    public var done: Bool?
-    public init(title: String? = nil, done: Bool? = nil) {
-        self.title = title
-        self.done = done
-    }
-}
-
 public struct ListQuery: Sendable {
     public var status: TaskStatus?
     public var query: String?
@@ -219,12 +211,20 @@ public struct MeetingDTO: Codable, Sendable, Equatable {
         if meeting.status == .completed { meeting.processedAt = meeting.processedAt ?? Date() }
 
         if let remote = actionItems {
-            // Keep the user's decisions; only adopt new suggestions from the server.
+            // A decision made elsewhere (another Mac, or before a reinstall) wins when
+            // the server sends `state`; otherwise keep the user's local decision.
             let decided = Dictionary(uniqueKeysWithValues:
                 meeting.actionItems.filter { $0.state != .suggested }.map { ($0.id, $0) })
             meeting.actionItems = remote.enumerated().compactMap { index, dto in
                 guard var item = dto.toActionItem(meetingID: meeting.id, position: Double(index)) else { return nil }
-                if let existing = decided[item.id] {
+                // The server is authoritative only once it has a real decision.
+                // "suggested" is also what it says before a local ADD/DISMISS has
+                // synced, so trusting it would resurrect dismissed suggestions.
+                let serverDecided = dto.decidedState.flatMap { $0 == .suggested ? nil : $0 }
+                if let serverDecided {
+                    item.state = serverDecided
+                    item.taskID = dto.taskId.flatMap(UUID.init(uuidString:)) ?? item.taskID
+                } else if let existing = decided[item.id] {
                     item.state = existing.state
                     item.taskID = existing.taskID
                 }
@@ -244,14 +244,35 @@ public struct ActionItemDTO: Codable, Sendable, Equatable {
     public var assignee: String?
     public var dueDate: String?
     public var confidence: Double?
+    /// The server's decision for this suggestion, when it has one. Absent on older
+    /// responses, where the local decision must survive.
+    public var state: String?
+    /// The task the server linked when the suggestion was accepted.
+    public var taskId: String?
+
+    public init(id: String, title: String, assignee: String? = nil, dueDate: String? = nil,
+                confidence: Double? = nil, state: String? = nil, taskId: String? = nil) {
+        self.id = id
+        self.title = title
+        self.assignee = assignee
+        self.dueDate = dueDate
+        self.confidence = confidence
+        self.state = state
+        self.taskId = taskId
+    }
+
+    /// nil unless the server actually sent a recognised state.
+    var decidedState: ActionItem.State? {
+        state.flatMap(ActionItem.State.init(rawValue:))
+    }
 
     public func toActionItem(meetingID: UUID, position: Double) -> ActionItem? {
         // Server ids are opaque strings; derive a stable UUID when they are not one.
         let uuid = UUID(uuidString: id) ?? UUID.stable(from: "\(meetingID.uuidString):\(id)")
         return ActionItem(id: uuid, meetingID: meetingID, title: title, assignee: assignee,
                           dueDate: dueDate.flatMap { DateInput.parse($0) },
-                          confidence: confidence ?? 0, state: .suggested,
-                          taskID: nil, position: position)
+                          confidence: confidence ?? 0, state: decidedState ?? .suggested,
+                          taskID: taskId.flatMap(UUID.init(uuidString:)), position: position)
     }
 }
 
@@ -373,28 +394,106 @@ public enum APIError: Error, Sendable, LocalizedError {
         default: return false
         }
     }
+
+    /// The HTTP status behind this error, when the server answered at all.
+    public var statusCode: Int? {
+        switch self {
+        case .unauthorized: return 401
+        case .notFound: return 404
+        // validate() maps both 400 and 422 here; either way the body was rejected.
+        case .badRequest: return 400
+        case .server(let code, _): return code
+        case .offline, .unsupported: return nil
+        }
+    }
 }
 
 // MARK: - Deterministic UUIDs
 
 public extension UUID {
     /// Stable UUID derived from a string, so a server id that is not a UUID still maps
-    /// to the same local identity across refreshes.
+    /// to the same local identity across refreshes and launches.
+    ///
+    /// SHA-256, not `Hasher`: `Hasher` is seeded per process, so the same string used
+    /// to produce different ids after a relaunch.
     static func stable(from string: String) -> UUID {
-        var hasher = Hasher()
-        hasher.combine(string)
-        let a = UInt64(bitPattern: Int64(hasher.finalize()))
-        var hasher2 = Hasher()
-        hasher2.combine("kanban-salt")
-        hasher2.combine(string)
-        let b = UInt64(bitPattern: Int64(hasher2.finalize()))
-        var bytes = [UInt8]()
-        withUnsafeBytes(of: a.bigEndian) { bytes.append(contentsOf: $0) }
-        withUnsafeBytes(of: b.bigEndian) { bytes.append(contentsOf: $0) }
+        var bytes = Array(SHA256.hash(data: Data(string.utf8)).prefix(16))
         bytes[6] = (bytes[6] & 0x0F) | 0x40   // version 4
         bytes[8] = (bytes[8] & 0x3F) | 0x80   // variant
         return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
                            bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11],
                            bytes[12], bytes[13], bytes[14], bytes[15]))
+    }
+}
+
+// MARK: - Server URL policy
+
+/// One place for what counts as a usable backend URL. Settings gates every remote
+/// feature on this and the sync engine refuses the same values, so the two cannot
+/// disagree about why the app is local-only.
+public enum ServerURLPolicy {
+
+    /// Hosts where plain HTTP never leaves the machine.
+    public static func isLoopback(host: String?) -> Bool {
+        let host = (host ?? "").lowercased()
+            .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        return host == "localhost" || host == "127.0.0.1" || host == "::1"
+    }
+
+    /// A private or carrier-grade-NAT address: LAN, link-local, or Tailscale.
+    /// Plain HTTP there does not traverse the public internet.
+    public static func isPrivateNetwork(host: String?) -> Bool {
+        let host = (host ?? "").lowercased()
+        if host.hasSuffix(".local") { return true }
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        // Every component must be a number; `10.1.2.3.example.com` must not pass.
+        guard parts.count == 4 else { return false }
+        let octets = parts.compactMap { Int($0) }
+        guard octets.count == 4, octets.allSatisfy({ (0...255).contains($0) }) else { return false }
+        switch (octets[0], octets[1]) {
+        case (10, _), (127, _), (169, 254), (192, 168): return true
+        case (172, 16...31): return true
+        case (100, 64...127): return true   // Tailscale / carrier-grade NAT
+        default: return false
+        }
+    }
+
+    /// nil when the URL is usable, or when nothing has been entered yet. Otherwise
+    /// the sentence to show the user.
+    public static func problem(with raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+        guard let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host, !host.isEmpty else {
+            return "Enter a full URL, e.g. https://vps.example.com."
+        }
+        if scheme == "http", !isLoopback(host: host), !isPrivateNetwork(host: host) {
+            return "Plain HTTP sends the API key in the clear. Use https://, or an address on your local network."
+        }
+        return nil
+    }
+
+    /// True only when a URL is present and acceptable.
+    public static func isUsable(_ raw: String) -> Bool {
+        !raw.trimmingCharacters(in: .whitespaces).isEmpty && problem(with: raw) == nil
+    }
+}
+
+// MARK: - Outbox policy
+
+/// Which failed replays may be dropped. Auth, routing and conflict failures are
+/// configuration/state problems: the queued edit is still wanted, so dropping it
+/// would lose user data.
+public enum OutboxPolicy {
+    /// Only a body the server definitively rejected may be dropped.
+    public static func holdsQueue(status: Int) -> Bool {
+        switch status {
+        case 400, 422: return false
+        // 409 means the row changed since the edit (or the server already has it).
+        // The edit is still wanted; keeping it is safer than deleting it.
+        default: return true
+        }
     }
 }

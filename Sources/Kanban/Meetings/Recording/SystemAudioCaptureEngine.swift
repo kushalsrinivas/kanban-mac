@@ -29,10 +29,14 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
     private(set) var isPaused = false
     private(set) var sources = CaptureSources(microphone: .disabled, systemAudio: .disabled)
 
-    var elapsed: TimeInterval {
-        guard let startedAt else { return 0 }
-        return Date().timeIntervalSince(startedAt) - pausedDuration
-    }
+    var elapsed: TimeInterval { clock.elapsed() }
+
+    /// Bumped by every `start` and by every teardown, so a stop that lands while
+    /// `start()` is awaiting permissions cannot let the graph come up afterwards.
+    private var generation: UInt64 = 0
+    /// Token of the `start()` currently in flight, if any. Lets an abandoned start
+    /// tell "a teardown happened" apart from "a newer start took the engine".
+    private var startingToken: UInt64?
 
     /// The audio graph, rebuilt from scratch for every recording.
     ///
@@ -57,9 +61,7 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
     private let streamOutput = StreamAudioOutput()
 
     // Timing
-    private var startedAt: Date?
-    private var pausedAt: Date?
-    private var pausedDuration: TimeInterval = 0
+    private let clock = ElapsedClock()
 
     /// Shared with the audio thread. `OSAllocatedUnfairLock` keeps the meter throttle
     /// off the main actor without a full lock on every buffer.
@@ -159,9 +161,17 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
 
     func start(to url: URL, request: CaptureRequest) async throws {
         guard !isRecording else { throw CaptureError.alreadyRecording }
+        generation &+= 1
+        let token = generation
+        startingToken = token
 
         var resolved = await requestPermissions(request)
+        guard token == generation else {
+            if startingToken == token { startingToken = nil }
+            throw CaptureError.notRecording
+        }
         guard !resolved.isSilent else {
+            startingToken = nil
             if request.microphone && resolved.microphone == .denied { throw CaptureError.microphoneDenied }
             throw CaptureError.noSourcesAvailable
         }
@@ -189,6 +199,7 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
         do {
             try writer.open(url: url, settings: Self.outputSettings, tapFormat: tapFormat)
         } catch {
+            startingToken = nil
             throw CaptureError.engine("Could not open the recording file: \(error.localizedDescription)")
         }
         outputURL = url
@@ -211,21 +222,22 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
         // This closure runs on a realtime audio thread. It must not touch the main
         // actor, allocate, block, or log.
         let writer = self.writer
-        let clock = self.meterClock
+        let meter = self.meterClock
+        let elapsedClock = self.clock
         let sink: @Sendable (Float, TimeInterval) -> Void = { [weak self] level, elapsed in
             DispatchQueue.main.async {
                 self?.delegate?.captureDidUpdate(level: level, elapsed: elapsed)
             }
         }
-        let started = Date()
 
         graph.mixer.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { buffer, _ in
             let peak = writer.write(buffer)
             // Throttle UI updates to ~10 Hz; a 60 fps meter is wasted CPU.
-            if clock.shouldPost() {
-                sink(min(1, peak * 1.6), Date().timeIntervalSince(started))
+            if meter.shouldPost() {
+                sink(min(1, peak * 1.6), elapsedClock.elapsed())
             }
         }
+        elapsedClock.start()
 
         do {
             engine.prepare()
@@ -233,6 +245,8 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
         } catch {
             cleanupGraph()
             writer.finish()
+            elapsedClock.reset()
+            startingToken = nil
             try? FileManager.default.removeItem(at: url)
             throw CaptureError.engine("Audio engine failed to start: \(error.localizedDescription)")
         }
@@ -254,11 +268,21 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
             throw CaptureError.noSourcesAvailable
         }
 
+        // A stop that landed while the stream was starting must not resurrect the
+        // recording. Tear down what this call brought up — unless a newer start
+        // already owns the engine, in which case leave its graph alone.
+        guard token == generation else {
+            if startingToken == token {
+                startingToken = nil
+                await cancel()
+                try? FileManager.default.removeItem(at: url)
+            }
+            throw CaptureError.notRecording
+        }
+        startingToken = nil
+
         sources = resolved
         delegate?.captureSourcesDidChange(resolved)
-        startedAt = Date()
-        pausedDuration = 0
-        pausedAt = nil
         isRecording = true
         isPaused = false
     }
@@ -267,27 +291,26 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
         guard isRecording, !isPaused, let graph else { throw CaptureError.notRecording }
         writer.setPaused(true)
         graph.engine.pause()
-        pausedAt = Date()
+        clock.pause()
         isPaused = true
     }
 
     func resume() throws {
         guard isRecording, isPaused, let graph else { throw CaptureError.notRecording }
-        if let pausedAt { pausedDuration += Date().timeIntervalSince(pausedAt) }
-        pausedAt = nil
         do {
             try graph.engine.start()
         } catch {
             throw CaptureError.engine("Could not resume: \(error.localizedDescription)")
         }
+        clock.resume()
         writer.setPaused(false)
         isPaused = false
     }
 
     func stop() async throws -> CaptureResult {
         guard isRecording, let url = outputURL else { throw CaptureError.notRecording }
+        generation &+= 1
         let duration = elapsed
-
         await stopSystemAudio()
         cleanupGraph()
         isRecording = false
@@ -297,23 +320,38 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
         let peak = writer.peakLevel
         // Releasing the file flushes the encoder's trailing frames.
         writer.finish()
+        // Read after the flush so a failure on the final buffer is included; the
+        // writer keeps the failure until the next open.
+        let failure = writer.writeError
 
         let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
         outputURL = nil
-        startedAt = nil
+        clock.reset()
+
+        // A file write that failed leaves a short or silent file behind. Report it
+        // rather than handing the uploader something that looks successful.
+        if let failure {
+            throw CaptureError.engine("The recording could not be written: \(failure.localizedDescription)")
+        }
 
         return CaptureResult(fileURL: url, duration: duration, byteCount: size, peakLevel: peak)
     }
 
-    func cancel() async {
+    func closeKeepingFile() async {
+        generation &+= 1
         await stopSystemAudio()
         cleanupGraph()
         writer.finish()
-        if let url = outputURL { try? FileManager.default.removeItem(at: url) }
         outputURL = nil
-        startedAt = nil
+        clock.reset()
         isRecording = false
         isPaused = false
+    }
+
+    func cancel() async {
+        let url = outputURL
+        await closeKeepingFile()
+        if let url { try? FileManager.default.removeItem(at: url) }
     }
 
     // MARK: - System audio
@@ -351,10 +389,13 @@ final class SystemAudioCaptureEngine: NSObject, AudioCaptureEngine {
         // Scheduling a buffer whose format differs from the player's connection is
         // the same silence trap the microphone just came out of.
         streamOutput.targetFormat = format
+        let writer = self.writer
         streamOutput.onBuffer = { buffer in
             // Still checked: scheduling a buffer the player's connection does not
-            // expect raises rather than returns, and conversion can fail.
-            guard player.isPlaying, buffer.format == format else { return }
+            // expect raises rather than returns, and conversion can fail. Paused
+            // buffers are dropped here — queueing them on the player would grow the
+            // backlog for the whole pause and then play stale audio on resume.
+            guard player.isPlaying, !writer.isPaused, buffer.format == format else { return }
             player.scheduleBuffer(buffer, completionHandler: nil)
         }
         streamOutput.onStopped = { [weak self] reason in

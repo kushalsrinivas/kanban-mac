@@ -1,7 +1,8 @@
 # Work Console — macOS app
 
 A Kanban board, a meeting recorder and an agent console, built as one native macOS
-utility. Backend lives in [`kanban-backend`](../kanban-backend).
+utility. Backend lives in [`kanban-backend`](../kanban-backend); the monorepo
+overview is [`../README.md`](../README.md).
 
 The Mac does what only the Mac can do: draw the interface, take keyboard input, and
 capture audio. Transcription, analysis and agent reasoning all happen on the VPS.
@@ -147,13 +148,15 @@ xcodebuild -project Kanban.xcodeproj -scheme KanbanTests \
   -destination 'platform=macOS,arch=arm64' test
 ```
 
-64 tests: store and migrations, the outbox, the task service, wire DTOs, date and
-quick-add parsing, snapshot generation, capture-source reporting.
+103 tests at the time of writing (one fixture generator is skipped unless explicitly enabled): store and migrations, the outbox, the task
+service, wire DTOs, date and quick-add parsing, snapshot generation,
+capture-source reporting.
 
-`FixtureGenerator` writes `Tests/Fixtures/*.json` from the real encoders. Run
-`scripts/sync-contract-fixtures.sh` to copy them into the backend repo, whose suite
-asserts against those exact bytes. That is what keeps the two repos honest with each
-other.
+`FixtureGenerator` writes `Tests/Fixtures/*.json` from the real encoders, but only
+when `KANBAN_WRITE_FIXTURES=1` is set — otherwise a test run would rewrite tracked
+files. Run `scripts/sync-contract-fixtures.sh` to copy them into the backend repo,
+whose suite asserts against those exact bytes. That is what keeps the two repos
+honest with each other.
 
 ## Design
 

@@ -21,7 +21,11 @@ final class FixtureGenerator: XCTestCase {
         try encoder.encode(value).write(to: directory.appendingPathComponent(name))
     }
 
+    /// Not part of a normal test run: it rewrites tracked files, and the timestamps
+    /// inside are naturally non-deterministic. Set KANBAN_WRITE_FIXTURES=1 to run it.
     func testGenerateFixtures() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["KANBAN_WRITE_FIXTURES"] == "1",
+                          "set KANBAN_WRITE_FIXTURES=1 to regenerate the wire fixtures")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let store = LocalStore(ephemeral: true)
         let service = TaskService(store: store, syncEnabled: true)

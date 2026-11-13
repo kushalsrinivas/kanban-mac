@@ -50,13 +50,24 @@ final class AppSettings {
             if loadedAPIKey == nil { loadedAPIKey = KeychainStore.get(.apiToken) ?? "" }
             return loadedAPIKey ?? ""
         }
-        set {
-            loadedAPIKey = newValue
-            KeychainStore.set(newValue, for: .apiToken)
-        }
+        set { commitAPIKey(newValue) }
     }
 
-    private var loadedAPIKey: String?
+    /// Set when the last keychain write failed, so Settings can say so instead of
+    /// accepting the text and silently losing it on quit.
+    private(set) var apiKeyWriteFailed = false
+
+    /// Writes the key and reports whether it reached the keychain. The settings field
+    /// calls this on end-editing/submit, not on every keystroke.
+    @discardableResult
+    func commitAPIKey(_ value: String) -> Bool {
+        loadedAPIKey = value
+        let stored = KeychainStore.set(value, for: .apiToken)
+        apiKeyWriteFailed = !stored
+        return stored
+    }
+
+    @ObservationIgnored private var loadedAPIKey: String?
 
     // Meetings
     var captureMicrophone: Bool { didSet { set(captureMicrophone, "captureMicrophone") } }
@@ -126,10 +137,10 @@ final class AppSettings {
     }
 
     /// True when a usable backend URL is set. Everything remote is gated on this;
-    /// without it the app is a purely local task manager.
+    /// without it the app is a purely local task manager. Plain HTTP is refused for
+    /// anything but a loopback host — the bearer token would travel in the clear.
     var backendIsConfigured: Bool {
-        guard let url = URL(string: serverURL.trimmingCharacters(in: .whitespaces)) else { return false }
-        return url.scheme?.hasPrefix("http") == true && url.host != nil
+        ServerURLPolicy.isUsable(serverURL)
     }
 
     func applyActivationPolicy() {

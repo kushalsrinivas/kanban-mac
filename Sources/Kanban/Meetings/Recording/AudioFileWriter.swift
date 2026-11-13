@@ -22,6 +22,11 @@ final class AudioFileWriter: @unchecked Sendable {
     private var paused = false
     private(set) var frameCount: AVAudioFramePosition = 0
 
+    /// The first conversion or write failure. A disk that filled up or a converter
+    /// that could not be built leaves a short, possibly silent file — it must not be
+    /// reported as a usable recording just because the bytes exist.
+    private var failure: Error?
+
     /// Loudest sample written so far. Read once at the end of a recording to tell
     /// "nobody spoke" apart from "the microphone was never really open".
     private var peak: Float = 0
@@ -39,6 +44,9 @@ final class AudioFileWriter: @unchecked Sendable {
         self.frameCount = 0
         self.paused = false
         self.peak = 0
+        self.failure = self.converter == nil
+            ? CaptureError.engine("Could not create an audio converter for the recording.")
+            : nil
     }
 
     /// Releasing the file is what flushes the encoder's trailing frames.
@@ -60,6 +68,14 @@ final class AudioFileWriter: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return paused
+    }
+
+    /// Nil while every buffer reached the file. Once set, `stop()` must fail the
+    /// recording instead of offering the truncated file for upload.
+    var writeError: Error? {
+        lock.lock()
+        defer { lock.unlock() }
+        return failure
     }
 
     /// Peak across everything that actually reached the file.
@@ -113,8 +129,11 @@ final class AudioFileWriter: @unchecked Sendable {
                 frameCount += AVAudioFramePosition(output.frameLength)
             } catch {
                 // Disk full or the file vanished. Drop the buffer rather than trap;
-                // stop() will report the short recording.
+                // stop() reports the failure and keeps whatever was written.
+                if failure == nil { failure = error }
             }
+        } else if let error, failure == nil {
+            failure = error
         }
         return peak
     }

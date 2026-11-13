@@ -31,9 +31,11 @@
     <key>NSHumanReadableCopyright</key>
     <string>Personal task manager.</string>
     <key>NSSupportsAutomaticTermination</key>
-    <true/>
+    <false/>
     <key>NSSupportsSuddenTermination</key>
     <false/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.productivity</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

@@ -123,6 +123,15 @@ final class AudioWriterTests: XCTestCase {
         writer.finish()
     }
 
+    func testHealthyWriterReportsNoWriteError() throws {
+        let writer = AudioFileWriter()
+        XCTAssertNil(writer.writeError, "an unopened writer has not failed")
+        try writer.open(url: url, settings: settings, tapFormat: tapFormat)
+        for _ in 0..<10 { _ = writer.write(buffer()) }
+        writer.finish()
+        XCTAssertNil(writer.writeError, "a clean run must not claim a failure")
+    }
+
     func testOpenFailsCleanlyOnAnUnwritablePath() {
         let writer = AudioFileWriter()
         let bad = URL(fileURLWithPath: "/System/definitely/not/writable/x.m4a")

@@ -12,6 +12,7 @@ struct MeetingsView: View {
                 MeetingListPanel()
             }
             .frame(width: 300)
+            .frame(maxHeight: .infinity, alignment: .top)
 
             VRule()
 
@@ -48,6 +49,7 @@ struct MeetingsView: View {
 struct RecordingPanel: View {
     @Environment(\.theme) private var theme
     @Environment(AppModel.self) private var app
+    @State private var confirmingDelete = false
 
     var body: some View {
         let recorder = Bindable(app.recorder)
@@ -57,7 +59,8 @@ struct RecordingPanel: View {
                 HStack {
                     MicroLabel("meeting")
                     Spacer()
-                    MicroLabel(app.recorder.isRecording ? "live" : "ready")
+                    MicroLabel(app.recorder.isRecording ? "live"
+                               : app.recorder.phase == .preparing ? "preparing" : "ready")
                 }
 
                 Rule()
@@ -85,6 +88,16 @@ struct RecordingPanel: View {
                 }
             }
         }
+        .confirmationDialog("Delete this recording?",
+                            isPresented: $confirmingDelete,
+                            titleVisibility: .visible) {
+            if let id = app.recorder.lastFinished?.meetingID {
+                Button("Delete Everywhere", role: .destructive) { app.deleteMeeting(id) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The audio, the notes and the VPS copy are deleted. This cannot be undone.")
+        }
     }
 
     // MARK: States
@@ -101,7 +114,7 @@ struct RecordingPanel: View {
                 .padding(.vertical, 5)
                 .background(theme.panelAlt, in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-                    .strokeBorder(theme.line, lineWidth: Theme.Metric.hairline))
+                    .strokeBorder(theme.lineStrong, lineWidth: Theme.Metric.hairline))
 
             Text("00:00:00")
                 .font(Theme.mono(30, weight: .light))
@@ -130,7 +143,7 @@ struct RecordingPanel: View {
             } label: {
                 HStack(spacing: 6) {
                     Circle().fill(theme.paper).frame(width: 7, height: 7)
-                    Text("START RECORDING")
+                    Text(app.recorder.phase == .preparing ? "PREPARING…" : "START RECORDING")
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -217,7 +230,7 @@ struct RecordingPanel: View {
                         .buttonStyle(PanelButtonStyle(compact: true))
                 }
                 Spacer()
-                Button("DELETE") { app.deleteMeeting(finished.meetingID) }
+                Button("DELETE") { confirmingDelete = true }
                     .buttonStyle(BareButtonStyle())
             }
         }
@@ -278,6 +291,7 @@ struct RecordingPanel: View {
 
 private struct RecordingDot: View {
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let isPaused: Bool
     @State private var dim = false
 
@@ -285,8 +299,9 @@ private struct RecordingDot: View {
         Circle()
             .fill(isPaused ? theme.inkTertiary : theme.signal)
             .frame(width: 9, height: 9)
-            .opacity(dim && !isPaused ? 0.35 : 1)
-            .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: dim)
+            .opacity(reduceMotion ? 1 : (dim && !isPaused ? 0.35 : 1))
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.9).repeatForever(autoreverses: true),
+                       value: dim)
             .onAppear { dim = true }
     }
 }
@@ -337,6 +352,11 @@ private struct MeetingListPanel: View {
                     VStack(spacing: 4) {
                         Text("—").font(Theme.mono(14)).foregroundStyle(theme.line)
                         MicroLabel("nothing recorded")
+                        Text("PRESS ⌘R TO RECORD YOUR FIRST MEETING")
+                            .font(Theme.mono(9, weight: .medium))
+                            .tracking(0.7)
+                            .foregroundStyle(theme.inkTertiary)
+                            .padding(.top, 2)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 26)
@@ -362,7 +382,7 @@ private struct MeetingListPanel: View {
                         }
                     }
                     .scrollIndicators(.never)
-                    .frame(maxHeight: 340)
+                    .frame(minHeight: 120)
                 }
             }
         }
@@ -433,11 +453,25 @@ private struct MeetingRow: View {
     }
 
     private var timeLabel: String {
+        let sameDay = Calendar.current.isDateInToday(meeting.startedAt)
+        return (sameDay ? Self.clockFormatter : Self.weekdayFormatter)
+            .string(from: meeting.startedAt)
+            .uppercased()
+    }
+
+    private static let clockFormatter: DateFormatter = {
         let df = DateFormatter()
         df.locale = Locale(identifier: "en_US_POSIX")
-        df.dateFormat = Calendar.current.isDateInToday(meeting.startedAt) ? "HH:mm" : "EEE"
-        return df.string(from: meeting.startedAt).uppercased()
-    }
+        df.dateFormat = "HH:mm"
+        return df
+    }()
+
+    private static let weekdayFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.dateFormat = "EEE"
+        return df
+    }()
 }
 
 // MARK: - Meeting actions

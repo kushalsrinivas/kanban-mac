@@ -15,9 +15,6 @@ struct InspectorView: View {
                 } else {
                     placeholder("TASK NOT FOUND")
                 }
-            case .agent:
-                // The agent has its own section now; the inspector is tasks only.
-                placeholder("AGENT MOVED TO ITS OWN TAB")
             case .hidden:
                 EmptyView()
             }
@@ -78,6 +75,21 @@ struct TaskInspector: View {
         }
         .onAppear(perform: load)
         .onChange(of: task.id) { _, _ in load() }
+        .onDisappear {
+            // The inspector is rebuilt with .id(task.id) when selection changes or it
+            // closes. Commit drafts here so an edit made just before that is not lost.
+            commitTitle()
+            commitNotes()
+            commitDue()
+            commitTags()
+        }
+        .onChange(of: task.dueDate) { _, new in
+            // Quick buttons and the agent can change the due date while this view is
+            // open; do not overwrite text the user is mid-edit in.
+            if editorFocus != .due {
+                dueText = new.map { DateInput.shortLabel($0) } ?? ""
+            }
+        }
     }
 
     // MARK: Sections
@@ -92,9 +104,12 @@ struct TaskInspector: View {
                 .foregroundStyle(theme.inkSecondary)
             Button { app.closeInspector() } label: {
                 Image(systemName: "xmark").font(.system(size: 9, weight: .medium))
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(BareButtonStyle())
             .help("Close (esc)")
+            .accessibilityLabel("Close inspector")
         }
         .padding(.horizontal, 14)
         .padding(.top, 12)
@@ -120,7 +135,9 @@ struct TaskInspector: View {
                 SegmentPicker(
                     selection: Binding(
                         get: { task.priority },
-                        set: { value in try? app.taskService.edit(task.id) { $0.priority = value } }
+                        set: { value in
+                            _ = try? app.taskService.edit(task.id) { $0.priority = value }
+                        }
                     ),
                     options: Priority.allCases.map { ($0, $0.label) }
                 )
@@ -131,7 +148,9 @@ struct TaskInspector: View {
                 SegmentPicker(
                     selection: Binding(
                         get: { task.status },
-                        set: { value in try? app.taskService.move(task.id, to: value, index: 0) }
+                        set: { value in
+                            _ = try? app.taskService.move(task.id, to: value, index: 0)
+                        }
                     ),
                     options: TaskStatus.allCases.map { ($0, $0.label) }
                 )
@@ -143,7 +162,7 @@ struct TaskInspector: View {
                     Spacer()
                     if task.dueDate != nil {
                         Button("CLEAR") {
-                            try? app.taskService.edit(task.id) { $0.dueDate = nil }
+                            _ = try? app.taskService.edit(task.id) { $0.dueDate = nil }
                             dueText = ""
                         }
                         .buttonStyle(BareButtonStyle())
@@ -162,8 +181,9 @@ struct TaskInspector: View {
                     ForEach(["TODAY", "TMRW", "+7D"], id: \.self) { shortcut in
                         Button(shortcut) {
                             let value = shortcut == "TODAY" ? "today" : shortcut == "TMRW" ? "tomorrow" : "+7d"
-                            try? app.taskService.edit(task.id) { $0.dueDate = DateInput.parse(value) }
-                            dueText = task.dueDate.map { DateInput.shortLabel($0) } ?? ""
+                            let parsed = DateInput.parse(value)
+                            _ = try? app.taskService.edit(task.id) { $0.dueDate = parsed }
+                            dueText = parsed.map { DateInput.shortLabel($0) } ?? ""
                         }
                         .buttonStyle(PanelButtonStyle(compact: true))
                     }
@@ -202,7 +222,7 @@ struct TaskInspector: View {
                 .padding(6)
                 .background(theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-                    .strokeBorder(theme.line, lineWidth: Theme.Metric.hairline))
+                    .strokeBorder(theme.lineStrong, lineWidth: Theme.Metric.hairline))
                 .focused($editorFocus, equals: .notes)
                 .onChange(of: editorFocus) { old, _ in if old == .notes { commitNotes() } }
         }
@@ -224,15 +244,17 @@ struct TaskInspector: View {
             ForEach(task.subtasks) { subtask in
                 HStack(spacing: 7) {
                     Button {
-                        try? app.taskService.setSubtask(subtask.id, on: task.id, done: !subtask.isDone)
+                        _ = try? app.taskService.setSubtask(subtask.id, on: task.id, done: !subtask.isDone)
                     } label: {
-                        RoundedRectangle(cornerRadius: 2, style: .continuous)
+                        RoundedRectangle(cornerRadius: 2.5, style: .continuous)
                             .fill(subtask.isDone ? theme.ink : .clear)
                             .frame(width: 10, height: 10)
-                            .overlay(RoundedRectangle(cornerRadius: 2, style: .continuous)
+                            .overlay(RoundedRectangle(cornerRadius: 2.5, style: .continuous)
                                 .strokeBorder(subtask.isDone ? theme.ink : theme.lineStrong, lineWidth: 1))
+                            .contentShape(Rectangle().inset(by: -5))
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(subtask.isDone ? "Reopen \(subtask.title)" : "Complete \(subtask.title)")
 
                     Text(subtask.title)
                         .font(Theme.body)
@@ -243,11 +265,14 @@ struct TaskInspector: View {
                     Spacer(minLength: 0)
 
                     Button {
-                        try? app.taskService.removeSubtask(subtask.id, from: task.id)
+                        _ = try? app.taskService.removeSubtask(subtask.id, from: task.id)
                     } label: {
                         Image(systemName: "minus").font(.system(size: 8, weight: .medium))
+                            .frame(width: 20, height: 20)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(BareButtonStyle())
+                    .accessibilityLabel("Remove subtask \(subtask.title)")
                 }
             }
 
@@ -261,7 +286,7 @@ struct TaskInspector: View {
                     .onSubmit {
                         let t = newSubtask.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !t.isEmpty else { return }
-                        try? app.taskService.addSubtask(task.id, title: t)
+                        _ = try? app.taskService.addSubtask(task.id, title: t)
                         newSubtask = ""
                     }
             }
@@ -294,7 +319,7 @@ struct TaskInspector: View {
                     .padding(.vertical, 5)
                     .background(theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-                        .strokeBorder(theme.line, lineWidth: Theme.Metric.hairline))
+                        .strokeBorder(theme.lineStrong, lineWidth: Theme.Metric.hairline))
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -328,8 +353,9 @@ struct TaskInspector: View {
             .buttonStyle(PanelButtonStyle(prominent: !task.isDone))
 
             Button(task.isArchived ? "UNARCHIVE" : "ARCHIVE") {
-                if task.isArchived { try? app.taskService.unarchive(task.id) }
-                else {
+                if task.isArchived {
+                    _ = try? app.taskService.unarchive(task.id)
+                } else {
                     app.selection = task.id
                     app.archiveSelection()
                 }
@@ -339,8 +365,7 @@ struct TaskInspector: View {
             Spacer()
 
             Button("DELETE") {
-                app.selection = task.id
-                app.deleteSelection()
+                app.requestDelete(task.id)
             }
             .buttonStyle(PanelButtonStyle())
         }
@@ -355,7 +380,7 @@ struct TaskInspector: View {
             .padding(.vertical, 5)
             .background(theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-                .strokeBorder(theme.line, lineWidth: Theme.Metric.hairline))
+                .strokeBorder(theme.lineStrong, lineWidth: Theme.Metric.hairline))
     }
 
     private func metaRow(_ label: String, _ value: String) -> some View {
@@ -369,11 +394,15 @@ struct TaskInspector: View {
     }
 
     private func stamp(_ date: Date) -> String {
+        Self.stampFormatter.string(from: date).uppercased()
+    }
+
+    private static let stampFormatter: DateFormatter = {
         let df = DateFormatter()
         df.locale = Locale(identifier: "en_US_POSIX")
         df.dateFormat = "dd MMM yy HH:mm"
-        return df.string(from: date).uppercased()
-    }
+        return df
+    }()
 
     private func load() {
         title = task.title
@@ -388,12 +417,12 @@ struct TaskInspector: View {
             title = task.title
             return
         }
-        try? app.taskService.edit(task.id) { $0.title = trimmed }
+        _ = try? app.taskService.edit(task.id) { $0.title = trimmed }
     }
 
     private func commitNotes() {
         guard notes != task.notes else { return }
-        try? app.taskService.edit(task.id) { $0.notes = notes }
+        _ = try? app.taskService.edit(task.id) { $0.notes = notes }
     }
 
     private func commitTags() {
@@ -404,14 +433,16 @@ struct TaskInspector: View {
         var unique: [String] = []
         for tag in tags where !unique.contains(tag) { unique.append(tag) }
         guard unique != task.tags else { return }
-        try? app.taskService.edit(task.id) { $0.tags = unique }
+        _ = try? app.taskService.edit(task.id) { $0.tags = unique }
         tagText = unique.joined(separator: ", ")
     }
 
     private func commitDue() {
         let raw = dueText.trimmingCharacters(in: .whitespacesAndNewlines)
         if raw.isEmpty {
-            if task.dueDate != nil { try? app.taskService.edit(task.id) { $0.dueDate = nil } }
+            if task.dueDate != nil {
+                _ = try? app.taskService.edit(task.id) { $0.dueDate = nil }
+            }
             return
         }
         guard let date = DateInput.parse(raw) else {
@@ -419,7 +450,12 @@ struct TaskInspector: View {
             app.flash("UNPARSEABLE DATE")
             return
         }
-        try? app.taskService.edit(task.id) { $0.dueDate = date }
+        if let existing = task.dueDate, abs(existing.timeIntervalSince(date)) < 60 {
+            // Blurring an unchanged display label must not rewrite the date.
+            dueText = DateInput.shortLabel(existing)
+            return
+        }
+        _ = try? app.taskService.edit(task.id) { $0.dueDate = date }
         dueText = DateInput.shortLabel(date)
     }
 }

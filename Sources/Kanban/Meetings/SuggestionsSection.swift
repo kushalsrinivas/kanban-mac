@@ -181,6 +181,7 @@ struct AddTaskConfirmation: View {
                     .foregroundStyle(theme.ink)
                     .lineLimit(1...3)
                     .focused($titleFocused)
+                    .accessibilityLabel("Task title")
             }
 
             VStack(alignment: .leading, spacing: 5) {
@@ -208,10 +209,8 @@ struct AddTaskConfirmation: View {
                         .padding(.vertical, 5)
                         .background(theme.panelAlt, in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-                            .strokeBorder(theme.line, lineWidth: Theme.Metric.hairline))
-                        .onChange(of: dueText) { _, value in
-                            draft.dueDate = value.isEmpty ? nil : DateInput.parse(value)
-                        }
+                            .strokeBorder(theme.lineStrong, lineWidth: Theme.Metric.hairline))
+                        .accessibilityLabel("Due date")
                     Button("TODAY") { setDue("today") }.buttonStyle(PanelButtonStyle(compact: true))
                     Button("TMRW") { setDue("tomorrow") }.buttonStyle(PanelButtonStyle(compact: true))
                 }
@@ -233,7 +232,23 @@ struct AddTaskConfirmation: View {
                 Button("CANCEL") { app.pendingSuggestion = nil }
                     .buttonStyle(PanelButtonStyle())
                 Spacer()
-                Button("ADD TASK") { app.commitSuggestion(draft) }
+                Button("ADD TASK") {
+                    // The parsed date is the source of truth. Only a field the user
+                    // actually edited is re-parsed, so TODAY/TMRW labels never go
+                    // back through the parser.
+                    if dueIsEdited {
+                        let typed = dueText.trimmingCharacters(in: .whitespaces)
+                        if typed.isEmpty {
+                            draft.dueDate = nil
+                        } else if let date = DateInput.parse(typed) {
+                            draft.dueDate = date
+                        } else {
+                            app.flash("UNPARSEABLE DATE")
+                            return
+                        }
+                    }
+                    app.commitSuggestion(draft)
+                }
                     .buttonStyle(PanelButtonStyle(prominent: true))
                     .disabled(draft.title.trimmingCharacters(in: .whitespaces).isEmpty)
             }
@@ -253,5 +268,11 @@ struct AddTaskConfirmation: View {
     private func setDue(_ value: String) {
         draft.dueDate = DateInput.parse(value)
         dueText = draft.dueDate.map { DateInput.shortLabel($0) } ?? ""
+    }
+
+    /// True only when the field no longer shows the label of the parsed date, i.e.
+    /// the user typed into it after the last programmatic set.
+    private var dueIsEdited: Bool {
+        dueText != (draft.dueDate.map { DateInput.shortLabel($0) } ?? "")
     }
 }

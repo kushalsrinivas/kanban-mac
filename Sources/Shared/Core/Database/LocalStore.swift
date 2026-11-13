@@ -82,14 +82,10 @@ public final class LocalStore {
         return (open, active, dueToday, overdue)
     }
 
-    public var allTags: [String] {
-        var seen = Set<String>()
-        for t in tasks where !t.isArchived { seen.formUnion(t.tags) }
-        return seen.sorted()
-    }
-
     public func snapshot(now: Date = Date(), recording: BoardSnapshot.Recording? = nil) -> BoardSnapshot {
-        BoardSnapshot.make(from: tasks, recording: recording, now: now)
+        BoardSnapshot.make(from: tasks, recording: recording,
+                           suggestedCount: meetings.reduce(0) { $0 + $1.suggestedCount },
+                           now: now)
     }
 
     // MARK: - Task mutations
@@ -170,13 +166,6 @@ public final class LocalStore {
         return true
     }
 
-    @discardableResult
-    public func purgeArchivedTasks() -> Int {
-        let ids = tasks.filter(\.isArchived).map(\.id)
-        for id in ids { deleteTask(id) }
-        return ids.count
-    }
-
     /// Replaces the cache with what the server returned. Local-only rows that still
     /// have outbox entries are kept so an offline edit is never clobbered by a refresh.
     public func replaceTasks(with remote: [TaskItem]) {
@@ -246,7 +235,6 @@ public final class LocalStore {
 
     public var activeRecording: Meeting? { meetings.first { $0.status == .recording } }
 
-    public var processingMeetings: [Meeting] { meetings.filter { $0.status.isProcessing } }
 
     /// Meetings recorded but never uploaded — the offline queue.
     public var meetingsAwaitingUpload: [Meeting] { meetings.filter(\.awaitsUpload) }
@@ -585,12 +573,23 @@ public final class LocalStore {
 
     private static func writeMeeting(_ m: Meeting, into db: SQLiteDatabase) throws {
         try db.transaction {
+            // UPSERT, never INSERT OR REPLACE: replacing the row would delete it and
+            // fire ON DELETE CASCADE across transcript_segments. Meetings are loaded
+            // without their transcript, so any later status change would wipe it.
             try db.run("""
-                INSERT OR REPLACE INTO meetings
+                INSERT INTO meetings
                 (id, remote_id, title, started, duration, status, audio_filename, uploaded,
                  processed, failure, job_id, summary, key_points, decisions, questions,
                  topics, participants)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                    remote_id=excluded.remote_id, title=excluded.title, started=excluded.started,
+                    duration=excluded.duration, status=excluded.status,
+                    audio_filename=excluded.audio_filename, uploaded=excluded.uploaded,
+                    processed=excluded.processed, failure=excluded.failure, job_id=excluded.job_id,
+                    summary=excluded.summary, key_points=excluded.key_points,
+                    decisions=excluded.decisions, questions=excluded.questions,
+                    topics=excluded.topics, participants=excluded.participants;
                 """,
                 [.text(m.id.uuidString), m.remoteID.map { .text($0) } ?? .null, .text(m.title),
                  .double(m.startedAt.timeIntervalSince1970), .double(m.duration), .text(m.status.rawValue),

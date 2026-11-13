@@ -126,6 +126,7 @@ struct MenuBarView: View {
                 .font(Theme.mono(11.5))
                 .foregroundStyle(theme.ink)
                 .focused($fieldFocused)
+                .accessibilityLabel("New task")
                 .onSubmit {
                     guard !draft.trimmingCharacters(in: .whitespaces).isEmpty else { return }
                     app.quickAdd(draft)
@@ -187,15 +188,17 @@ struct MenuBarView: View {
                 MenuAction(label: "REVIEW \(app.openSuggestionCount) SUGGESTED", shortcut: "") {
                     openMain()
                     app.section = .meetings
+                    if let meeting = app.store.meetings.first(where: { $0.suggestedCount > 0 }) {
+                        app.selectedMeeting = meeting.id
+                    }
                 }
             }
-            MenuAction(label: "ASK AGENT", shortcut: "⌘K") {
+            MenuAction(label: "ASK AGENT", shortcut: "") {
                 openMain()
                 app.section = .agent
             }
-            MenuAction(label: "OPEN APP", shortcut: "⌘O") { openMain() }
+            MenuAction(label: "OPEN APP", shortcut: "") { openMain() }
             MenuAction(label: "QUIT", shortcut: "⌘Q") {
-                app.shutdown()
                 NSApplication.shared.terminate(nil)
             }
         }
@@ -211,49 +214,67 @@ struct MenuBarView: View {
 private struct MenuTaskRow: View {
     @Environment(\.theme) private var theme
     @Environment(AppModel.self) private var app
+    @Environment(\.openWindow) private var openWindow
     let task: TaskItem
 
     @State private var hovering = false
 
     var body: some View {
-        Button {
-            try? app.taskService.complete(task.id)
-        } label: {
-            HStack(spacing: 7) {
+        HStack(spacing: 7) {
+            Button {
+                _ = try? app.taskService.complete(task.id)
+            } label: {
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
                     .strokeBorder(hovering ? theme.ink : theme.lineStrong, lineWidth: 1)
                     .frame(width: 9, height: 9)
-
-                Text(task.title)
-                    .font(Theme.mono(11))
-                    .foregroundStyle(theme.ink)
-                    .lineLimit(1)
-
-                Spacer(minLength: 6)
-
-                if let due = task.dueDate {
-                    Text(DateInput.shortLabel(due))
-                        .font(Theme.mono(9))
-                        .foregroundStyle(task.isOverdue() ? theme.signal : theme.inkTertiary)
-                } else if task.status == .inProgress {
-                    Text("ACTIVE").font(Theme.mono(9)).foregroundStyle(theme.inkTertiary)
-                }
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 4)
-            .background(hovering ? theme.selectionFill : .clear)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .help("Complete “\(task.title)”")
+            .accessibilityLabel("Complete \(task.title)")
+
+            Button(action: open) {
+                HStack(spacing: 6) {
+                    Text(task.title)
+                        .font(Theme.mono(11))
+                        .foregroundStyle(theme.ink)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 6)
+
+                    if let due = task.dueDate {
+                        Text(DateInput.shortLabel(due))
+                            .font(Theme.mono(9))
+                            .foregroundStyle(task.isOverdue() ? theme.signal : theme.inkTertiary)
+                    } else if task.status == .inProgress {
+                        Text("ACTIVE").font(Theme.mono(9)).foregroundStyle(theme.inkTertiary)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Open “\(task.title)”")
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 3)
+        .background(hovering ? theme.selectionFill : .clear)
         .onHover { hovering = $0 }
-        .help("Complete “\(task.title)”")
+    }
+
+    private func open() {
+        openWindow(id: KanbanWindow.board)
+        NSApp.activate(ignoringOtherApps: true)
+        app.selection = task.id
+        app.focusedStatus = task.status
+        app.openInspector(for: task.id)
     }
 }
 
 private struct MenuAction: View {
     @Environment(\.theme) private var theme
     let label: String
-    let shortcut: String
+    var shortcut: String = ""
     var accent: Bool = false
     let action: () -> Void
 
@@ -268,9 +289,11 @@ private struct MenuAction: View {
                     .tracking(0.9)
                     .foregroundStyle(theme.ink)
                 Spacer()
-                Text(shortcut)
-                    .font(Theme.mono(9.5))
-                    .foregroundStyle(theme.inkTertiary)
+                if !shortcut.isEmpty {
+                    Text(shortcut)
+                        .font(Theme.mono(9.5))
+                        .foregroundStyle(theme.inkTertiary)
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)

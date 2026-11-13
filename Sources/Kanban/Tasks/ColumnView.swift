@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 struct ColumnView: View {
     @Environment(\.theme) private var theme
     @Environment(AppModel.self) private var app
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let status: TaskStatus
     let tasks: [TaskItem]
@@ -31,6 +32,7 @@ struct ColumnView: View {
                 }
                 .padding(.horizontal, 8)
                 .padding(.bottom, 10)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: tasks.count)
             }
             .scrollIndicators(.never)
         }
@@ -43,11 +45,16 @@ struct ColumnView: View {
         )
         // Fallback: dropping anywhere in the status appends to the end.
         .dropDestination(for: TaskTransfer.self) { items, _ in
-            guard let id = items.first?.uuid else { return false }
-            try? app.taskService.move(id, to: status, index: tasks.count)
-            app.selection = id
-            app.focusedStatus = status
-            return true
+            guard !app.isSearchActive, let id = items.first?.uuid else { return false }
+            do {
+                try app.taskService.move(id, to: status, index: tasks.count)
+                app.selection = id
+                app.focusedStatus = status
+                return true
+            } catch {
+                app.flash("COULD NOT MOVE TASK")
+                return false
+            }
         } isTargeted: { isColumnTargeted = $0 }
     }
 
@@ -97,11 +104,12 @@ struct ColumnView: View {
                 Image(systemName: "plus")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(theme.inkSecondary)
-                    .frame(width: 16, height: 16)
+                    .frame(width: 20, height: 20)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Add to \(status.label)")
+            .accessibilityLabel("Add to \(status.label)")
         }
         .padding(.horizontal, 12)
         .padding(.top, 11)
@@ -109,7 +117,7 @@ struct ColumnView: View {
         .overlay(alignment: .top) {
             // Focused status gets a 2px cap rule, like a selected channel on a mixer.
             if app.focusedStatus == status {
-                Rectangle().fill(theme.ink).frame(height: 2)
+                Rectangle().fill(theme.accent).frame(height: 2)
                     .padding(.horizontal, 12)
                     .padding(.top, 0)
             }
@@ -154,11 +162,17 @@ private struct DropGap: View {
         .frame(height: 8)
         .contentShape(Rectangle())
         .dropDestination(for: TaskTransfer.self) { items, _ in
-            guard let id = items.first?.uuid else { return false }
-            try? app.taskService.move(id, to: status, index: index)
-            app.selection = id
-            app.focusedStatus = status
-            return true
+            // A filtered board has no meaningful insertion index in the full list.
+            guard !app.isSearchActive, let id = items.first?.uuid else { return false }
+            do {
+                try app.taskService.move(id, to: status, index: index)
+                app.selection = id
+                app.focusedStatus = status
+                return true
+            } catch {
+                app.flash("COULD NOT MOVE TASK")
+                return false
+            }
         } isTargeted: { isTargeted = $0 }
     }
 }
@@ -213,24 +227,31 @@ struct TaskContextMenu: View {
         Divider()
         Menu("Move to") {
             ForEach(TaskStatus.allCases, id: \.self) { status in
-                Button(status.label.capitalized) { try? app.taskService.move(task.id, to: status, index: 0) }
-                    .disabled(status == task.status)
+                Button(status.label.capitalized) {
+                    do { try app.taskService.move(task.id, to: status, index: 0) }
+                    catch { app.flash("COULD NOT MOVE TASK") }
+                }
+                .disabled(status == task.status)
             }
         }
         Menu("Priority") {
             ForEach(Priority.allCases.reversed(), id: \.self) { priority in
                 Button(priority.longLabel.capitalized) {
-                    try? app.taskService.edit(task.id) { $0.priority = priority }
+                    do { try app.taskService.edit(task.id) { $0.priority = priority } }
+                    catch { app.flash("COULD NOT UPDATE TASK") }
                 }
                 .disabled(priority == task.priority)
             }
         }
         Menu("Due") {
-            Button("Today") { try? app.taskService.edit(task.id) { $0.dueDate = DateInput.parse("today") } }
-            Button("Tomorrow") { try? app.taskService.edit(task.id) { $0.dueDate = DateInput.parse("tomorrow") } }
-            Button("Next week") { try? app.taskService.edit(task.id) { $0.dueDate = DateInput.parse("+7d") } }
+            Button("Today") { setDue("today") }
+            Button("Tomorrow") { setDue("tomorrow") }
+            Button("Next week") { setDue("+7d") }
             Divider()
-            Button("Clear") { try? app.taskService.edit(task.id) { $0.dueDate = nil } }
+            Button("Clear") {
+                do { try app.taskService.edit(task.id) { $0.dueDate = nil } }
+                catch { app.flash("COULD NOT UPDATE TASK") }
+            }
         }
         Divider()
         Button("Archive") {
@@ -238,8 +259,13 @@ struct TaskContextMenu: View {
             app.archiveSelection()
         }
         Button("Delete") {
-            app.selection = task.id
-            app.deleteSelection()
+            app.requestDelete(task.id)
         }
+    }
+
+    private func setDue(_ raw: String) {
+        guard let date = DateInput.parse(raw) else { return }
+        do { try app.taskService.edit(task.id) { $0.dueDate = date } }
+        catch { app.flash("COULD NOT UPDATE TASK") }
     }
 }

@@ -7,6 +7,22 @@ struct SettingsView: View {
 
     @State private var recordingsBytes: Int64 = 0
     @State private var confirmingRecordingPurge = false
+    @State private var confirmingArchivedPurge = false
+    @State private var confirmingOutboxDiscard = false
+    @State private var confirmingEmptyPull = false
+    @State private var showingArchived = false
+    /// The API key is drafted here and only written to the Keychain on commit —
+    /// writing on every keystroke hammered the Keychain and hid failures.
+    @State private var apiKeyDraft = ""
+    @State private var apiKeyStored = false
+    @FocusState private var apiKeyFocused: Bool
+
+    private var archivedCount: Int { app.store.tasks.filter(\.isArchived).count }
+
+    /// The policy's own answer, so Settings cannot drift from what the client accepts.
+    private var serverURLProblem: String? {
+        ServerURLPolicy.problem(with: app.settings.serverURL)
+    }
 
     var body: some View {
         let bindable = Bindable(app.settings)
@@ -27,7 +43,12 @@ struct SettingsView: View {
         .background(theme.paper)
         .environment(\.theme, app.theme)
         .preferredColorScheme(app.settings.colorScheme)
-        .onAppear { recordingsBytes = KanbanPaths.recordingsByteCount() }
+        .onAppear {
+            recordingsBytes = KanbanPaths.recordingsByteCount()
+            apiKeyDraft = app.settings.apiKey
+            apiKeyStored = !apiKeyDraft.isEmpty
+        }
+        .onDisappear { commitAPIKey() }
         .confirmationDialog("Delete every saved recording?",
                             isPresented: $confirmingRecordingPurge,
                             titleVisibility: .visible) {
@@ -40,6 +61,45 @@ struct SettingsView: View {
             Text("The meetings, their notes and their transcripts are kept — only the audio "
                  + "files are deleted. Anything still waiting to upload is left alone. "
                  + "This cannot be undone.")
+        }
+        .confirmationDialog("Permanently delete \(archivedCount) archived task\(archivedCount == 1 ? "" : "s")?",
+                            isPresented: $confirmingArchivedPurge,
+                            titleVisibility: .visible) {
+            Button("Delete Archived Tasks", role: .destructive) {
+                let removed = app.purgeArchived()
+                app.flash("PURGED \(removed)")
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("They are removed from this Mac"
+                 + (app.settings.backendIsConfigured ? " and from the VPS" : "")
+                 + ". This cannot be undone.")
+        }
+        .confirmationDialog("Discard \(app.sync.pendingCount) queued change\(app.sync.pendingCount == 1 ? "" : "s")?",
+                            isPresented: $confirmingOutboxDiscard,
+                            titleVisibility: .visible) {
+            Button("Discard Changes", role: .destructive) {
+                app.store.clearOutbox()
+                app.flash("QUEUE DISCARDED")
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Those edits have not reached the VPS. Discarding them keeps the local copy but "
+                 + "the next refresh will replace it with the server's version.")
+        }
+        .confirmationDialog("Replace \(app.store.tasks.count) local task\(app.store.tasks.count == 1 ? "" : "s") with the empty server?",
+                            isPresented: $confirmingEmptyPull,
+                            titleVisibility: .visible) {
+            Button("Delete Local Tasks", role: .destructive) {
+                Task { await app.sync.pull(allowEmptyTasks: true) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The server has no tasks. Your local tasks are not on the VPS and will be "
+                 + "removed from this Mac. This cannot be undone.")
+        }
+        .sheet(isPresented: $showingArchived) {
+            ArchivedTasksSheet().environment(app)
         }
     }
 
@@ -80,14 +140,15 @@ struct SettingsView: View {
             }
             row("ARCHIVED") {
                 HStack(spacing: 8) {
-                    Text("\(app.store.tasks.filter(\.isArchived).count) RECORDS")
+                    Text("\(archivedCount) RECORDS")
                         .font(Theme.mono(10.5))
                         .foregroundStyle(theme.inkSecondary)
-                    Button("PURGE") {
-                        let n = app.store.purgeArchivedTasks()
-                        app.flash("PURGED \(n)")
-                    }
-                    .buttonStyle(PanelButtonStyle(compact: true))
+                    Button("RESTORE…") { showingArchived = true }
+                        .buttonStyle(PanelButtonStyle(compact: true))
+                        .disabled(archivedCount == 0)
+                    Button("PURGE") { confirmingArchivedPurge = true }
+                        .buttonStyle(PanelButtonStyle(compact: true))
+                        .disabled(archivedCount == 0)
                 }
             }
         }
@@ -164,11 +225,25 @@ struct SettingsView: View {
             row("SERVER URL") {
                 field(text: settings.serverURL, placeholder: "https://vps.example.com")
             }
+            if let problem = serverURLProblem {
+                note(problem)
+            }
             row("API KEY") {
                 HStack(spacing: 8) {
-                    secureField(text: settings.apiKey, placeholder: "bearer token")
-                    MicroLabel(KeychainStore.has(.apiToken) ? "in keychain" : "not set")
+                    secureField(text: $apiKeyDraft, placeholder: "bearer token")
+                        .focused($apiKeyFocused)
+                        .onSubmit { commitAPIKey() }
+                        .onChange(of: apiKeyFocused) { _, focused in
+                            if !focused { commitAPIKey() }
+                        }
+                    Button("SAVE") { commitAPIKey() }
+                        .buttonStyle(PanelButtonStyle(compact: true))
+                    MicroLabel(apiKeyStored ? "in keychain" : "not set")
                 }
+            }
+            if app.settings.apiKeyWriteFailed {
+                note("Could not write the API key to the keychain. It works for this session but "
+                     + "will be gone after a restart — unlock the login keychain and press SAVE again.")
             }
             row("TIMEOUT") {
                 HStack(spacing: 8) {
@@ -195,6 +270,11 @@ struct SettingsView: View {
                         .buttonStyle(PanelButtonStyle(compact: true))
                 }
             }
+            row("LAST SYNC") {
+                Text(app.sync.lastSyncedAt.map { DateInput.shortLabel($0) } ?? "NEVER")
+                    .font(Theme.mono(10.5))
+                    .foregroundStyle(theme.inkSecondary)
+            }
             if app.sync.pendingCount > 0 {
                 row("QUEUED") {
                     HStack(spacing: 8) {
@@ -203,7 +283,7 @@ struct SettingsView: View {
                             .foregroundStyle(theme.inkSecondary)
                         Button("RETRY") { Task { await app.sync.flushOutbox() } }
                             .buttonStyle(PanelButtonStyle(compact: true))
-                        Button("DISCARD") { app.store.clearOutbox() }
+                        Button("DISCARD") { confirmingOutboxDiscard = true }
                             .buttonStyle(PanelButtonStyle(compact: true))
                     }
                 }
@@ -211,7 +291,24 @@ struct SettingsView: View {
             if let error = app.sync.lastError {
                 note(error)
             }
+            if app.sync.heldEmptyPull {
+                HStack(spacing: 8) {
+                    Button("REPLACE WITH EMPTY SERVER…") { confirmingEmptyPull = true }
+                        .buttonStyle(PanelButtonStyle(compact: true))
+                }
+            }
             note("Transcription, analysis and the agent all run on your VPS. Tasks and recording keep working when it is unreachable.")
+        }
+    }
+
+    /// Commits the draft on submit, focus loss, or close. An unchanged value is skipped
+    /// so merely opening Settings never rewrites the Keychain.
+    private func commitAPIKey() {
+        let current = app.settings.apiKey
+        guard apiKeyDraft != current || app.settings.apiKeyWriteFailed else { return }
+        if app.settings.commitAPIKey(apiKeyDraft) {
+            apiKeyStored = !apiKeyDraft.isEmpty
+            app.flash(apiKeyDraft.isEmpty ? "API KEY REMOVED" : "API KEY SAVED")
         }
     }
 
@@ -326,7 +423,7 @@ struct SettingsView: View {
             .padding(.vertical, 4)
             .background(theme.panelAlt, in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-                .strokeBorder(theme.line, lineWidth: Theme.Metric.hairline))
+                .strokeBorder(theme.lineStrong, lineWidth: Theme.Metric.hairline))
             .frame(maxWidth: 280)
     }
 
@@ -340,7 +437,82 @@ struct SettingsView: View {
             .padding(.vertical, 4)
             .background(theme.panelAlt, in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-                .strokeBorder(theme.line, lineWidth: Theme.Metric.hairline))
+                .strokeBorder(theme.lineStrong, lineWidth: Theme.Metric.hairline))
             .frame(maxWidth: 200)
+    }
+}
+
+// MARK: - Archived tasks
+
+/// The recovery path for ARCHIVE. Without it an archived task would be unreachable:
+/// the board hides it and the only other action was PURGE.
+private struct ArchivedTasksSheet: View {
+    @Environment(\.theme) private var theme
+    @Environment(AppModel.self) private var app
+    @Environment(\.dismiss) private var dismiss
+
+    private var archived: [TaskItem] {
+        app.store.tasks
+            .filter(\.isArchived)
+            .sorted { ($0.archivedAt ?? .distantPast) > ($1.archivedAt ?? .distantPast) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline) {
+                MicroLabel("archived tasks")
+                Spacer()
+                Button("DONE") { dismiss() }
+                    .buttonStyle(BareButtonStyle(emphasised: true))
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 9)
+
+            Rule()
+
+            if archived.isEmpty {
+                VStack(spacing: 5) {
+                    Text("—").font(Theme.mono(14)).foregroundStyle(theme.line)
+                    MicroLabel("nothing archived")
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(archived) { task in
+                            HStack(spacing: 10) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(task.title)
+                                        .font(Theme.body)
+                                        .foregroundStyle(theme.ink)
+                                        .lineLimit(1)
+                                    Text(archivedLabel(task))
+                                        .font(Theme.mono(9.5))
+                                        .foregroundStyle(theme.inkTertiary)
+                                }
+                                Spacer(minLength: 8)
+                                Button("RESTORE") {
+                                    _ = try? app.taskService.unarchive(task.id)
+                                }
+                                .buttonStyle(PanelButtonStyle(compact: true))
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .overlay(alignment: .bottom) { Rule() }
+                        }
+                    }
+                }
+                .scrollIndicators(.never)
+            }
+        }
+        .frame(width: 480, height: 380)
+        .background(theme.paper)
+        .environment(\.theme, app.theme)
+    }
+
+    private func archivedLabel(_ task: TaskItem) -> String {
+        guard let date = task.archivedAt else { return task.status.label }
+        return "ARCHIVED \(DateInput.shortLabel(date)) · \(task.status.label)"
     }
 }

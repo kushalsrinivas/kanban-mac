@@ -14,7 +14,9 @@ public struct MicroLabel: View {
     }
 
     public var body: some View {
-        Text(text.uppercased())
+        // textCase, not .uppercased(): VoiceOver reads "task", not "T-A-S-K".
+        Text(text)
+            .textCase(.uppercase)
             .font(Theme.microLabel)
             .tracking(0.9)
             .foregroundStyle(color ?? theme.inkTertiary)
@@ -133,7 +135,7 @@ public struct PillToggle: View {
             .padding(.vertical, 3)
             .frame(width: 52, alignment: isOn ? .leading : .trailing)
             .background(isOn ? theme.ink : theme.panelAlt, in: Capsule())
-            .overlay(Capsule().strokeBorder(theme.line, lineWidth: Theme.Metric.hairline))
+            .overlay(Capsule().strokeBorder(theme.lineStrong, lineWidth: Theme.Metric.hairline))
         }
         .buttonStyle(.plain)
     }
@@ -171,7 +173,7 @@ public struct SegmentPicker<T: Hashable>: View {
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-                .strokeBorder(theme.line, lineWidth: Theme.Metric.hairline)
+                .strokeBorder(theme.lineStrong, lineWidth: Theme.Metric.hairline)
         )
     }
 }
@@ -180,6 +182,7 @@ public struct SegmentPicker<T: Hashable>: View {
 
 public struct PanelButtonStyle: ButtonStyle {
     @Environment(\.theme) private var theme
+    @Environment(\.isEnabled) private var isEnabled
     private let prominent: Bool
     private let compact: Bool
 
@@ -202,15 +205,18 @@ public struct PanelButtonStyle: ButtonStyle {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-                    .strokeBorder(prominent ? Color.clear : theme.line, lineWidth: Theme.Metric.hairline)
+                    .strokeBorder(prominent ? Color.clear : theme.lineStrong,
+                                  lineWidth: Theme.Metric.hairline)
             )
             .contentShape(Rectangle())
+            .opacity(isEnabled ? 1 : 0.4)
     }
 }
 
 /// Text-only action, used inside dense lists ("+ADD" in the reference).
 public struct BareButtonStyle: ButtonStyle {
     @Environment(\.theme) private var theme
+    @Environment(\.isEnabled) private var isEnabled
     private let emphasised: Bool
 
     public init(emphasised: Bool = false) { self.emphasised = emphasised }
@@ -220,7 +226,8 @@ public struct BareButtonStyle: ButtonStyle {
             .font(Theme.mono(10, weight: .medium))
             .tracking(0.8)
             .foregroundStyle(emphasised ? theme.ink : theme.inkSecondary)
-            .opacity(configuration.isPressed ? 0.6 : 1)
+            .padding(.vertical, 4)
+            .opacity(isEnabled ? (configuration.isPressed ? 0.6 : 1) : 0.4)
             .contentShape(Rectangle())
     }
 }

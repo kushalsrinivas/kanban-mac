@@ -160,7 +160,7 @@ private struct SmallWidget: View {
                     TaskLine(line: line, size: 9.5)
                 }
                 if entry.snapshot.agenda.isEmpty {
-                    Text(entry.isPlaceholder ? "OPEN THE APP" : "CLEAR")
+                    Text(entry.isPlaceholder ? "OPEN THE APP" : "ALL CLEAR")
                         .font(Theme.mono(9.5))
                         .foregroundStyle(theme.inkTertiary)
                 }

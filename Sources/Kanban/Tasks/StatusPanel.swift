@@ -38,6 +38,7 @@ struct StatusPanel: View {
         }
         .frame(width: 96, alignment: .leading)
         .padding(.leading, 14)
+        .accessibilityElement(children: .combine)
     }
 }
 

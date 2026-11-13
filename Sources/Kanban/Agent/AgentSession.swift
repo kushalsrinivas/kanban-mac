@@ -30,7 +30,8 @@ final class AgentSession {
     private let sync: SyncEngine
 
     /// Raised when the server reports that task data changed, so the app can re-pull.
-    var onTasksChanged: (() -> Void)?
+    /// The count is the number of operations applied in that turn.
+    var onTasksChanged: ((Int) -> Void)?
 
     init(store: LocalStore, client: APIClient, settings: AppSettings, sync: SyncEngine) {
         self.store = store
@@ -59,6 +60,9 @@ final class AgentSession {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isBusy else { return }
 
+        // Snapshot history BEFORE appending this turn: the request carries the new
+        // message separately, and sending it twice confuses the model.
+        let prior = Array(messages.suffix(12))
         messages.append(Message(kind: .user, text: trimmed))
 
         guard settings.backendIsConfigured else {
@@ -72,7 +76,7 @@ final class AgentSession {
 
         let request = AgentRequest(
             message: trimmed,
-            history: messages.suffix(12).compactMap { message in
+            history: prior.compactMap { message in
                 switch message.kind {
                 case .user: return AgentRequest.Turn(role: "user", content: message.text)
                 case .agent: return AgentRequest.Turn(role: "assistant", content: message.text)
@@ -107,14 +111,32 @@ final class AgentSession {
             messages.append(Message(kind: .applied, text: action.summary))
             await handle(response, suppressPendingReset: true)
         } catch let error as APIError {
+            // A 409 means the server already executed it; retrying forever would be
+            // noise. Auth failures need a settings change, not another tap.
+            let permanent = error.statusCode == 409 || error.statusCode == 401
+                || error.statusCode == 403
+            if !permanent, !pending.contains(where: { $0.id == action.id }) {
+                pending.insert(action, at: 0)
+            }
             messages.append(Message(kind: .failure, text: "\(action.summary): \(error.localizedDescription)"))
         } catch {
+            if !pending.contains(where: { $0.id == action.id }) { pending.insert(action, at: 0) }
             messages.append(Message(kind: .failure, text: "\(action.summary): \(error)"))
         }
     }
 
     func executeAll() async {
-        for action in pending { await execute(action) }
+        // A bulk press must not quietly include a destructive operation unless the
+        // user has turned the extra confirmation off.
+        let batch = pending.filter {
+            !$0.destructive || !settings.confirmDestructiveAgentActions
+        }
+        for action in batch { await execute(action) }
+    }
+
+    /// Operations a single bulk press may run.
+    var bulkExecutableCount: Int {
+        pending.filter { !$0.destructive || !settings.confirmDestructiveAgentActions }.count
     }
 
     func dismiss(_ action: AgentAction) {
@@ -145,7 +167,7 @@ final class AgentSession {
 
         if response.tasksChanged == true || !(response.appliedActions ?? []).isEmpty {
             await sync.pull()
-            onTasksChanged?()
+            onTasksChanged?((response.appliedActions ?? []).count)
         }
     }
 }

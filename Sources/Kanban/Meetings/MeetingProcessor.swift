@@ -25,6 +25,10 @@ final class MeetingProcessor {
     private let client: APIClient
     private let settings: AppSettings
     private var tasks: [UUID: Task<Void, Never>] = [:]
+    /// Bumped by every PROCESS and CANCEL. A cancelled run that is still unwinding
+    /// uses its old generation and can no longer write meeting state, so a second
+    /// upload cannot race the first one's teardown.
+    private var generations: [UUID: UInt64] = [:]
 
     /// Called when a meeting finishes processing, so the UI can jump to the results.
     var onCompleted: ((Meeting) -> Void)?
@@ -43,21 +47,28 @@ final class MeetingProcessor {
     /// The user pressed PROCESS.
     func process(_ meetingID: UUID) {
         guard tasks[meetingID] == nil else { return }
+        generations[meetingID, default: 0] &+= 1
+        let generation = generations[meetingID]!
         tasks[meetingID] = Task { [weak self] in
-            await self?.run(meetingID)
-            self?.tasks[meetingID] = nil
+            await self?.run(meetingID, generation: generation)
+            self?.finish(meetingID, generation: generation)
         }
     }
 
     /// Retries everything recorded but never uploaded. Called when the app regains a
     /// connection, not on a timer.
+    ///
+    /// Only `.readyToProcess` is picked up. `.failed` is a permanent failure the user
+    /// has to retry explicitly — re-uploading it on every activation would never
+    /// succeed and would keep hammering the server with the same bad recording.
     func processPending() {
-        for meeting in store.meetingsAwaitingUpload where meeting.status != .localOnly {
+        for meeting in store.meetingsAwaitingUpload where meeting.status == .readyToProcess {
             process(meeting.id)
         }
     }
 
     func cancel(_ meetingID: UUID) {
+        generations[meetingID, default: 0] &+= 1
         tasks[meetingID]?.cancel()
         tasks[meetingID] = nil
         active[meetingID] = nil
@@ -66,12 +77,28 @@ final class MeetingProcessor {
         }
     }
 
+    private func finish(_ meetingID: UUID, generation: UInt64) {
+        guard isCurrent(meetingID, generation) else { return }
+        tasks[meetingID] = nil
+    }
+
+    private func isCurrent(_ meetingID: UUID, _ generation: UInt64) -> Bool {
+        generations[meetingID] == generation
+    }
+
+    /// Throws when CANCEL (or a newer PROCESS) superseded this run while it awaited.
+    private func ensureCurrent(_ meetingID: UUID, _ generation: UInt64) throws {
+        guard isCurrent(meetingID, generation) else { throw CancellationError() }
+    }
+
     // MARK: Pipeline
 
-    private func run(_ meetingID: UUID) async {
-        guard let meeting = store.meeting(meetingID) else { return }
+    private func run(_ meetingID: UUID, generation: UInt64) async {
+        guard isCurrent(meetingID, generation), let meeting = store.meeting(meetingID) else { return }
         guard await client.isConfigured else {
-            fail(meetingID, "No VPS configured. Set the server URL in Settings.")
+            if isCurrent(meetingID, generation) {
+                fail(meetingID, "No VPS configured. Set the server URL in Settings.")
+            }
             return
         }
         guard let filename = meeting.audioFilename else {
@@ -92,44 +119,58 @@ final class MeetingProcessor {
                 title: meeting.title,
                 startedAt: DateInput.iso(meeting.startedAt),
                 duration: meeting.duration))
+            try ensureCurrent(meetingID, generation)
             store.updateMeeting(meetingID) { $0.remoteID = remote.id }
 
             // 2. Upload the audio.
             set(meetingID, .uploading)
             try await client.uploadAudio(meetingID: remote.id, fileURL: fileURL) { [weak self] fraction in
-                Task { @MainActor in self?.setUploadFraction(meetingID, fraction) }
+                Task { @MainActor in
+                    self?.setUploadFraction(meetingID, fraction, generation: generation)
+                }
             }
+            try ensureCurrent(meetingID, generation)
             store.updateMeeting(meetingID) { $0.uploadedAt = Date() }
 
             // 3. Ask the backend to process it. Returns a job, not a result.
             let job = try await client.processMeeting(remote.id)
+            try ensureCurrent(meetingID, generation)
             store.updateMeeting(meetingID) { $0.jobID = job.id }
 
             // 4. Follow the job.
-            try await follow(job: job, meetingID: meetingID, remoteID: remote.id)
+            try await follow(job: job, meetingID: meetingID, remoteID: remote.id,
+                             generation: generation)
 
             // 5. Pull the finished meeting and clean up the transport file.
-            try await fetchResults(meetingID: meetingID, remoteID: remote.id)
+            try await fetchResults(meetingID: meetingID, remoteID: remote.id,
+                                   generation: generation)
+            try ensureCurrent(meetingID, generation)
             cleanupAudio(meetingID: meetingID, filename: filename)
 
-            active[meetingID] = nil
-            if let finished = store.meeting(meetingID) { onCompleted?(finished) }
+            clearActive(meetingID, generation: generation)
+            if isCurrent(meetingID, generation), let finished = store.meeting(meetingID) {
+                onCompleted?(finished)
+            }
 
         } catch is CancellationError {
-            active[meetingID] = nil
+            clearActive(meetingID, generation: generation)
         } catch let error as APIError {
-            fail(meetingID, error.localizedDescription, transient: error.isTransient)
+            if isCurrent(meetingID, generation) {
+                fail(meetingID, error.localizedDescription, transient: error.isTransient)
+            }
         } catch {
-            fail(meetingID, "\(error)")
+            if isCurrent(meetingID, generation) { fail(meetingID, "\(error)") }
         }
     }
 
     /// Follows job state over SSE, falling back to polling if the stream will not open.
-    private func follow(job: JobDTO, meetingID: UUID, remoteID: String) async throws {
+    private func follow(job: JobDTO, meetingID: UUID, remoteID: String,
+                        generation: UInt64) async throws {
         if let stream = await sseStream(jobID: job.id) {
             do {
                 for try await update in stream.decoded(JobDTO.self) {
                     if Task.isCancelled { throw CancellationError() }
+                    try ensureCurrent(meetingID, generation)
                     apply(update, to: meetingID)
                     if update.meetingStatus == .completed { return }
                     if update.meetingStatus == .failed {
@@ -137,13 +178,22 @@ final class MeetingProcessor {
                     }
                 }
                 // Stream ended without a terminal event; confirm by polling once.
+            } catch is CancellationError {
+                throw CancellationError()
             } catch let error as APIError {
                 throw error
+            } catch let failure as SSEClient.Failure {
+                // An expired token must read as "re-authenticate", not as a stream
+                // problem that silently degrades to polling.
+                if case .http(let code) = failure, code == 401 || code == 403 {
+                    throw APIError.unauthorized
+                }
+                // SSE unavailable or dropped — fall through to polling.
             } catch {
                 // SSE unavailable or dropped — fall through to polling.
             }
         }
-        try await poll(jobID: job.id, meetingID: meetingID)
+        try await poll(jobID: job.id, meetingID: meetingID, generation: generation)
     }
 
     private func sseStream(jobID: String) async -> SSEClient? {
@@ -154,12 +204,14 @@ final class MeetingProcessor {
 
     /// Fallback progress. Intentionally slow — this only runs when SSE is unavailable,
     /// and a transcription job takes minutes, not milliseconds.
-    private func poll(jobID: String, meetingID: UUID) async throws {
+    private func poll(jobID: String, meetingID: UUID, generation: UInt64) async throws {
         let deadline = Date().addingTimeInterval(3 * 3600)
         var interval: UInt64 = 3
         while Date() < deadline {
             if Task.isCancelled { throw CancellationError() }
+            try ensureCurrent(meetingID, generation)
             let job = try await client.job(jobID)
+            try ensureCurrent(meetingID, generation)
             apply(job, to: meetingID)
             switch job.meetingStatus {
             case .completed: return
@@ -172,8 +224,9 @@ final class MeetingProcessor {
         throw APIError.server(504, "processing did not finish in time")
     }
 
-    private func fetchResults(meetingID: UUID, remoteID: String) async throws {
+    private func fetchResults(meetingID: UUID, remoteID: String, generation: UInt64) async throws {
         let dto = try await client.getMeeting(remoteID)
+        try ensureCurrent(meetingID, generation)
         guard let merged = dto.merged(into: store.meeting(meetingID)) else { return }
         store.upsertMeeting(merged)
         if !merged.transcript.isEmpty {
@@ -203,10 +256,15 @@ final class MeetingProcessor {
         store.updateMeeting(meetingID) { $0.status = status }
     }
 
-    private func setUploadFraction(_ meetingID: UUID, _ fraction: Double) {
-        guard var progress = active[meetingID] else { return }
+    private func setUploadFraction(_ meetingID: UUID, _ fraction: Double, generation: UInt64) {
+        guard isCurrent(meetingID, generation), var progress = active[meetingID] else { return }
         progress.uploadFraction = fraction
         active[meetingID] = progress
+    }
+
+    private func clearActive(_ meetingID: UUID, generation: UInt64) {
+        guard isCurrent(meetingID, generation) else { return }
+        active[meetingID] = nil
     }
 
     private func apply(_ job: JobDTO, to meetingID: UUID) {

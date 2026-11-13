@@ -37,6 +37,7 @@ public final class SQLiteDatabase {
     public func close() {
         if let handle { sqlite3_close_v2(handle) }
         handle = nil
+        depth = 0
     }
 
     private func fail(_ rc: Int32) -> Error {
@@ -142,15 +143,26 @@ public final class SQLiteDatabase {
         }
     }
 
-    /// Single write transaction. Rolls back on any thrown error.
+    /// Write transaction. Rolls back on any thrown error. Nested calls become
+    /// savepoints rather than a second `BEGIN`, which SQLite refuses — the store
+    /// legitimately nests (replaceTasks wraps insertTask).
+    private var depth = 0
+
     public func transaction<T>(_ body: () throws -> T) throws -> T {
-        try exec("BEGIN IMMEDIATE;")
+        let savepoint = depth > 0 ? "sp\(depth)" : nil
+        if let savepoint { try exec("SAVEPOINT \(savepoint);") } else { try exec("BEGIN IMMEDIATE;") }
+        depth += 1
+        defer { depth -= 1 }
         do {
             let result = try body()
-            try exec("COMMIT;")
+            if let savepoint { try exec("RELEASE \(savepoint);") } else { try exec("COMMIT;") }
             return result
         } catch {
-            try? exec("ROLLBACK;")
+            if let savepoint {
+                try? exec("ROLLBACK TO \(savepoint); RELEASE \(savepoint);")
+            } else {
+                try? exec("ROLLBACK;")
+            }
             throw error
         }
     }

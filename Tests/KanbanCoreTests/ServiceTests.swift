@@ -236,6 +236,45 @@ final class ServiceTests: XCTestCase {
         XCTAssertEqual(merged.transcript.first?.text, "hello")
     }
 
+    /// A local dismissal must survive a pull. The server still says "suggested"
+    /// until a dismissal is synced, and trusting that would resurrect the card.
+    func testAPullDoesNotResurrectADismissedSuggestion() throws {
+        let meetingID = UUID()
+        let itemID = UUID()
+
+        var existing = Meeting(id: meetingID, title: "Sync", status: .completed)
+        existing.actionItems = [ActionItem(id: itemID, meetingID: meetingID, title: "Review API",
+                                          state: .dismissed, taskID: nil)]
+
+        let json = """
+        {"id":"\(meetingID.uuidString)","title":"Sync","startedAt":"2026-09-18T10:30:00Z",
+         "duration":60,"status":"completed","summary":"",
+         "actionItems":[{"id":"\(itemID.uuidString)","title":"Review API","confidence":0.8,
+                         "state":"suggested","taskId":null}]}
+        """
+        let dto = try JSONDecoder().decode(MeetingDTO.self, from: Data(json.utf8))
+        let merged = try XCTUnwrap(dto.merged(into: existing))
+        XCTAssertEqual(merged.actionItems.first?.state, .dismissed)
+    }
+
+    /// But a decision the server did make — e.g. accepted on another device — wins.
+    func testAPullAcceptsAServerAcceptedSuggestion() throws {
+        let meetingID = UUID()
+        let itemID = UUID()
+        let taskID = UUID()
+
+        let json = """
+        {"id":"\(meetingID.uuidString)","title":"Sync","startedAt":"2026-09-18T10:30:00Z",
+         "duration":60,"status":"completed","summary":"",
+         "actionItems":[{"id":"\(itemID.uuidString)","title":"Review API","confidence":0.8,
+                         "state":"added","taskId":"\(taskID.uuidString)"}]}
+        """
+        let dto = try JSONDecoder().decode(MeetingDTO.self, from: Data(json.utf8))
+        let merged = try XCTUnwrap(dto.merged(into: nil))
+        XCTAssertEqual(merged.actionItems.first?.state, .added)
+        XCTAssertEqual(merged.actionItems.first?.taskID, taskID)
+    }
+
     func testMeetingDTOMapsNonUUIDServerIdsStably() throws {
         let meetingID = UUID()
         let dto = ActionItemDTO(id: "action_1", title: "t", assignee: nil, dueDate: nil, confidence: 0.5)
@@ -259,5 +298,97 @@ final class ServiceTests: XCTestCase {
         XCTAssertFalse(APIError.badRequest("").isTransient)
         XCTAssertFalse(APIError.notFound("").isTransient)
         XCTAssertFalse(APIError.unauthorized.isTransient)
+    }
+
+    // MARK: Server action-item state (U12)
+
+    func testActionItemDTODecodesServerStateAndTask() throws {
+        let taskID = UUID()
+        let json = """
+        {"id":"item-1","title":"Ship it","confidence":0.8,
+         "state":"added","taskId":"\(taskID.uuidString)"}
+        """
+        let dto = try JSONDecoder().decode(ActionItemDTO.self, from: Data(json.utf8))
+        XCTAssertEqual(dto.state, "added")
+        XCTAssertEqual(dto.taskId, taskID.uuidString)
+
+        let item = try XCTUnwrap(dto.toActionItem(meetingID: UUID(), position: 0))
+        XCTAssertEqual(item.state, .added)
+        XCTAssertEqual(item.taskID, taskID)
+    }
+
+    func testMeetingMergePrefersServerStateWhenPresent() throws {
+        let meetingID = UUID()
+        let itemID = UUID()
+        let serverTask = UUID()
+        let localTask = UUID()
+
+        var existing = Meeting(id: meetingID, title: "Sync")
+        existing.actionItems = [ActionItem(id: itemID, meetingID: meetingID, title: "Finish",
+                                          state: .suggested, taskID: localTask)]
+
+        let json = """
+        {"id":"\(meetingID.uuidString)","title":"Sync","startedAt":"2026-09-18T10:30:00Z",
+         "duration":60,"status":"completed",
+         "actionItems":[{"id":"\(itemID.uuidString)","title":"Finish","confidence":0.9,
+                         "state":"added","taskId":"\(serverTask.uuidString)"}]}
+        """
+        let dto = try JSONDecoder().decode(MeetingDTO.self, from: Data(json.utf8))
+        let merged = try XCTUnwrap(dto.merged(into: existing))
+
+        XCTAssertEqual(merged.actionItems.first?.state, .added,
+                       "a decision made on the server must survive a fresh install")
+        XCTAssertEqual(merged.actionItems.first?.taskID, serverTask)
+    }
+
+    // MARK: Stable ids (C6)
+
+    func testStableUUIDMatchesIndependentSHA256() {
+        // SHA-256("hello"), first 16 bytes, with the version/variant bits set.
+        XCTAssertEqual(UUID.stable(from: "hello"),
+                       UUID(uuidString: "2CF24DBA-5FB0-430E-A6E8-3B2AC5B9E29E"))
+        XCTAssertEqual(UUID.stable(from: "hello"), UUID.stable(from: "hello"))
+        XCTAssertNotEqual(UUID.stable(from: "hello"), UUID.stable(from: "HELLO"))
+    }
+
+    // MARK: Outbox drop policy (C5)
+
+    func testOutboxOnlyDropsRejectedBodies() {
+        XCTAssertFalse(OutboxPolicy.holdsQueue(status: 400))
+        XCTAssertTrue(OutboxPolicy.holdsQueue(status: 409),
+                      "a conflict must not silently discard the queued edit")
+        XCTAssertFalse(OutboxPolicy.holdsQueue(status: 422))
+        for status in [401, 403, 404, 429, 500, 503] {
+            XCTAssertTrue(OutboxPolicy.holdsQueue(status: status),
+                          "\(status) must keep the queued edit")
+        }
+    }
+
+    func testAPIErrorExposesStatusCode() {
+        XCTAssertEqual(APIError.unauthorized.statusCode, 401)
+        XCTAssertEqual(APIError.notFound("x").statusCode, 404)
+        XCTAssertEqual(APIError.server(503, "").statusCode, 503)
+        XCTAssertNil(APIError.offline("x").statusCode)
+    }
+
+    // MARK: Server URL policy (C16)
+
+    func testPlainHTTPOnlyAllowedForLoopback() {
+        XCTAssertNil(ServerURLPolicy.problem(with: "https://vps.example.com"))
+        XCTAssertNil(ServerURLPolicy.problem(with: "https://vps.example.com/api/v1"))
+        XCTAssertNil(ServerURLPolicy.problem(with: "http://localhost:8000"))
+        XCTAssertNil(ServerURLPolicy.problem(with: "http://127.0.0.1"))
+        XCTAssertNil(ServerURLPolicy.problem(with: "http://[::1]:8000"))
+        XCTAssertNil(ServerURLPolicy.problem(with: "http://192.168.1.10:8080"), "LAN")
+        XCTAssertNil(ServerURLPolicy.problem(with: "http://100.101.102.103:8080"), "Tailscale CGNAT")
+        XCTAssertNil(ServerURLPolicy.problem(with: ""), "no URL means local-only, not an error")
+
+        XCTAssertNotNil(ServerURLPolicy.problem(with: "http://vps.example.com"))
+        XCTAssertNotNil(ServerURLPolicy.problem(with: "ftp://vps.example.com"))
+        XCTAssertNotNil(ServerURLPolicy.problem(with: "not a url"))
+
+        XCTAssertFalse(ServerURLPolicy.isUsable(""))
+        XCTAssertFalse(ServerURLPolicy.isUsable("http://vps.example.com"))
+        XCTAssertTrue(ServerURLPolicy.isUsable("http://localhost:8000"))
     }
 }

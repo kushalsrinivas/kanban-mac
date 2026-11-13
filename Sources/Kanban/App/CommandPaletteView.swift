@@ -72,6 +72,9 @@ struct CommandPaletteView: View {
                             .contentShape(Rectangle())
                             .onTapGesture { run(row) }
                             .onHover { if $0 { highlighted = index } }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityAction { run(row) }
                     }
                 }
             }
@@ -109,7 +112,9 @@ struct CommandPaletteView: View {
             subtitle: QuickParse.hint(for: trimmed, defaultPriority: app.settings.defaultPriority,
                                       defaultStatus: app.settings.defaultStatus),
             group: "NEW",
-            action: { app.quickAdd(trimmed); app.flash("TASK FILED") }
+            action: {
+                if app.quickAdd(trimmed) != nil { app.flash("TASK FILED") }
+            }
         )
 
         return Array((scoredCommands + matchingTasks).prefix(9)) + [create]
@@ -204,7 +209,11 @@ struct PaletteItem: Identifiable {
                         group: "APP", action: { Task { await app.connect() } }),
             PaletteItem(id: "settings", title: "Open settings", subtitle: "appearance, agent, API",
                         group: "APP", shortcut: "⌘,", action: {
-                            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                            // Settings moved from the preferences selector in Ventura;
+                            // try both, and tell the user rather than doing nothing.
+                            let opened = NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                                || NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+                            if !opened { app.flash("SETTINGS UNAVAILABLE · PRESS ⌘,") }
                         })
         ]
 

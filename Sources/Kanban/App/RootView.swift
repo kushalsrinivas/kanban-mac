@@ -7,6 +7,7 @@ enum FocusTarget: Hashable {
 struct RootView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var focus: FocusTarget?
 
     var body: some View {
@@ -24,14 +25,17 @@ struct RootView: View {
                     .padding(.horizontal, Theme.Metric.gutter)
                     .padding(.top, 10)
 
-                Group {
+                // ZStack, not Group: a switch inside Group is not an insertion
+                // container, so the cross-fade never ran.
+                ZStack {
                     switch app.section {
-                    case .tasks: tasksSection
-                    case .meetings: MeetingsView().padding(.top, 10)
-                    case .agent: AgentConsoleView(focus: $focus).padding(.top, 10)
+                    case .tasks: tasksSection.transition(.opacity)
+                    case .meetings: MeetingsView().padding(.top, 10).transition(.opacity)
+                    case .agent: AgentConsoleView(focus: $focus).padding(.top, 10).transition(.opacity)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: app.section)
 
                 StatusFooter()
             }
@@ -49,8 +53,11 @@ struct RootView: View {
             if app.isPaletteOpen {
                 CommandPaletteView(isPresented: $app.isPaletteOpen)
                     .environment(\.theme, app.theme)
+                    .transition(.opacity.combined(with: .scale(0.98)))
+                    .accessibilityAddTraits(.isModal)
             }
         }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: app.isPaletteOpen)
         // The one modal in the app: turning an AI suggestion into a real task.
         .overlay {
             if let draft = app.pendingSuggestion {
@@ -61,9 +68,23 @@ struct RootView: View {
                         .onTapGesture { app.pendingSuggestion = nil }
                     AddTaskConfirmation(draft: draft)
                         .id(draft.id)
+                        .accessibilityAddTraits(.isModal)
                 }
                 .environment(\.theme, app.theme)
+                .transition(.opacity.combined(with: .scale(0.97)))
             }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: app.pendingSuggestion != nil)
+        .confirmationDialog("Delete this task?",
+                            isPresented: Binding(get: { app.deletionRequest != nil },
+                                                 set: { if !$0 { app.deletionRequest = nil } }),
+                            titleVisibility: .visible) {
+            Button("Delete Forever", role: .destructive) { app.confirmDeletion() }
+            Button("Cancel", role: .cancel) { app.deletionRequest = nil }
+        } message: {
+            Text("“\(app.selectedTask?.title ?? "This task")” is removed from this Mac"
+                 + (app.settings.backendIsConfigured ? " and the VPS" : "")
+                 + ". This cannot be undone.")
         }
         .onKeyPress(.upArrow) { arrow(.up) }
         .onKeyPress(.downArrow) { arrow(.down) }
@@ -108,6 +129,18 @@ struct RootView: View {
                 .padding(.horizontal, Theme.Metric.gutter)
                 .padding(.top, 10)
 
+            // First run: the board of empty columns says nothing about what to do.
+            // Count only live tasks: archived rows are pulled now, and a board whose
+            // only tasks are archived is still empty to the user.
+            if app.store.tasks.filter({ !$0.isArchived }).isEmpty && !app.isSearchActive {
+                Text("TYPE ABOVE OR PRESS ⌘N TO FILE YOUR FIRST TASK")
+                    .font(Theme.mono(9.5, weight: .medium))
+                    .tracking(0.8)
+                    .foregroundStyle(app.theme.inkTertiary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 14)
+            }
+
             if app.isSearchActive {
                 SearchBar(focus: $focus)
                     .padding(.horizontal, Theme.Metric.gutter)
@@ -122,9 +155,11 @@ struct RootView: View {
                     VRule()
                     InspectorView(focus: $focus)
                         .frame(width: 300)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
             .padding(.top, 10)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: app.inspector == .hidden)
         }
     }
 
@@ -182,9 +217,12 @@ private struct TitleBar: View {
 
             Button { app.toggleSearch() } label: {
                 Image(systemName: "magnifyingglass").font(.system(size: 10))
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(PanelButtonStyle(compact: true))
             .help("Search (⌘F)")
+            .accessibilityLabel("Search")
 
             Button { app.isPaletteOpen = true } label: { Text("⌘K") }
                 .buttonStyle(PanelButtonStyle(compact: true))
@@ -192,9 +230,12 @@ private struct TitleBar: View {
 
             SettingsLink {
                 Image(systemName: "slider.horizontal.3").font(.system(size: 10))
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(PanelButtonStyle(compact: true))
             .help("Settings (⌘,)")
+            .accessibilityLabel("Settings")
         }
         .padding(.leading, 64)   // clears the traffic lights
     }
@@ -284,7 +325,7 @@ private struct SectionTabs: View {
         .background(theme.panelAlt)
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-            .strokeBorder(theme.line, lineWidth: Theme.Metric.hairline))
+            .strokeBorder(theme.lineStrong, lineWidth: Theme.Metric.hairline))
     }
 
     private func badge(for section: AppModel.Section) -> String? {
@@ -333,7 +374,7 @@ private struct SearchBar: View {
         .padding(.vertical, 7)
         .background(theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-            .strokeBorder(theme.line, lineWidth: Theme.Metric.hairline))
+            .strokeBorder(theme.lineStrong, lineWidth: Theme.Metric.hairline))
     }
 }
 
@@ -351,6 +392,13 @@ private struct StatusFooter: View {
             MicroLabel("⌘1-4 COLUMN")
             MicroLabel("⌘R RECORD")
             Spacer(minLength: 0)
+            if let error = app.store.lastError {
+                Text("STORAGE ERROR")
+                    .font(Theme.mono(9.5, weight: .semibold))
+                    .tracking(0.8)
+                    .foregroundStyle(theme.signal)
+                    .help(error)
+            }
             if app.processor.isBusy {
                 MicroLabel("PROCESSING \(app.processor.active.count)")
             }

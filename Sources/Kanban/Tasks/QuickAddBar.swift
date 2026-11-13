@@ -25,6 +25,7 @@ struct QuickAddBar: View {
                 .foregroundStyle(theme.ink)
                 .focused($focus, equals: .quickAdd)
                 .onSubmit(submit)
+                .accessibilityLabel("New task")
 
             if !app.quickAddText.isEmpty {
                 Text(QuickParse.hint(for: app.quickAddText,
@@ -45,7 +46,7 @@ struct QuickAddBar: View {
         .padding(.vertical, 8)
         .background(theme.panel, in: Capsule(style: .continuous))
         .overlay(Capsule(style: .continuous)
-            .strokeBorder(focus == .quickAdd ? theme.lineStrong : theme.line,
+            .strokeBorder(focus == .quickAdd ? theme.ink : theme.lineStrong,
                           lineWidth: Theme.Metric.hairline))
         .contentShape(Capsule(style: .continuous))
         .onTapGesture { focus = .quickAdd }

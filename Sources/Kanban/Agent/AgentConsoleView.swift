@@ -10,6 +10,7 @@ struct AgentConsoleView: View {
     @FocusState.Binding var focus: FocusTarget?
 
     @State private var draft = ""
+    @State private var confirmingClear = false
 
     var body: some View {
         VStack(spacing: 10) {
@@ -25,6 +26,14 @@ struct AgentConsoleView: View {
             composer
         }
         .padding(.horizontal, Theme.Metric.gutter)
+        .confirmationDialog("Clear the console?", isPresented: $confirmingClear,
+                            titleVisibility: .visible) {
+            Button("Clear Without Executing", role: .destructive) { app.agent.clear() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            let count = app.agent.pending.count
+            Text("\(count) proposed operation\(count == 1 ? "" : "s") \(count == 1 ? "has" : "have") not been executed. Clearing discards them.")
+        }
     }
 
     // MARK: Header
@@ -42,9 +51,15 @@ struct AgentConsoleView: View {
                 block("PENDING OPS", String(format: "%02d", app.agent.pending.count),
                       tint: app.agent.pending.isEmpty ? nil : theme.signal)
                 Spacer(minLength: 8)
-                Button("CLEAR") { app.agent.clear() }
-                    .buttonStyle(BareButtonStyle())
-                    .padding(.trailing, 14)
+                Button("CLEAR") {
+                    if app.agent.pending.isEmpty {
+                        app.agent.clear()
+                    } else {
+                        confirmingClear = true
+                    }
+                }
+                .buttonStyle(BareButtonStyle())
+                .padding(.trailing, 14)
             }
             .frame(height: 60)
         }
@@ -145,10 +160,16 @@ struct AgentConsoleView: View {
             }
             .scrollIndicators(.never)
 
-            if app.agent.pending.count > 1 {
+            if app.agent.bulkExecutableCount > 1 {
                 Button("EXECUTE ALL") { Task { await app.agent.executeAll() } }
                     .buttonStyle(PanelButtonStyle(prominent: true))
                     .frame(maxWidth: .infinity)
+            }
+            if app.settings.confirmDestructiveAgentActions {
+                let destructive = app.agent.pending.filter(\.destructive).count
+                if destructive > 0 {
+                    MicroLabel("\(destructive) DESTRUCTIVE · CONFIRM SEPARATELY")
+                }
             }
         }
     }
@@ -248,6 +269,8 @@ private struct OperationCard: View {
     @Environment(AppModel.self) private var app
     let action: AgentAction
 
+    @State private var confirming = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -274,8 +297,14 @@ private struct OperationCard: View {
                 Spacer()
                 Button("DISMISS") { app.agent.dismiss(action) }
                     .buttonStyle(PanelButtonStyle(compact: true))
-                Button("EXECUTE") { Task { await app.agent.execute(action) } }
-                    .buttonStyle(PanelButtonStyle(prominent: true, compact: true))
+                Button("EXECUTE") {
+                    if action.destructive && app.settings.confirmDestructiveAgentActions {
+                        confirming = true
+                    } else {
+                        Task { await app.agent.execute(action) }
+                    }
+                }
+                .buttonStyle(PanelButtonStyle(prominent: true, compact: true))
             }
         }
         .padding(11)
@@ -283,5 +312,12 @@ private struct OperationCard: View {
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
             .strokeBorder(action.destructive ? theme.signal.opacity(0.5) : theme.line,
                           lineWidth: Theme.Metric.hairline))
+        .confirmationDialog("Run this destructive operation?", isPresented: $confirming,
+                            titleVisibility: .visible) {
+            Button("Execute", role: .destructive) { Task { await app.agent.execute(action) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(action.summary)
+        }
     }
 }

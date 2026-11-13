@@ -268,6 +268,27 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(store.tasks.contains { $0.id == queued.id },
                       "an unsynced local task must survive a server refresh")
         XCTAssertTrue(store.tasks.contains { $0.id == remote.id })
+        XCTAssertNil(store.lastError)
+    }
+
+    /// A replaced cache must actually land on disk — the replace nests a transaction.
+    func testReplaceTasksIsPersisted() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kanban-replace-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let remote = TaskItem(title: "from server", status: .todo)
+        let queued: TaskItem
+        do {
+            let store = LocalStore(url: url)
+            queued = store.createTask(TaskItem(title: "written offline"))
+            store.enqueue(kind: "task.create", method: "POST", path: "/tasks", entityID: queued.id)
+            store.replaceTasks(with: [remote])
+            XCTAssertNil(store.lastError)
+        }
+
+        let reopened = LocalStore(url: url)
+        XCTAssertEqual(Set(reopened.tasks.map(\.id)), [remote.id, queued.id])
     }
 
     // MARK: Persistence
@@ -354,5 +375,38 @@ final class StoreTests: XCTestCase {
         XCTAssertNotNil(store.lastError)
         _ = store.createTask(TaskItem(title: "after corruption"))
         XCTAssertEqual(store.tasks.count, 1, "the app must stay usable")
+    }
+}
+
+extension StoreTests {
+    /// A meeting header write must never cascade into its transcript.
+    func testMeetingHeaderWritePreservesTheTranscript() {
+        let store = makeStore()
+        let meetingID = UUID()
+        store.upsertMeeting(Meeting(id: meetingID, title: "Long", status: .completed))
+        store.saveTranscript([TranscriptSegment(start: 0, end: 4, speaker: "Alex", text: "hello")],
+                             for: meetingID)
+
+        store.updateMeeting(meetingID) { $0.title = "Renamed" }
+        XCTAssertEqual(store.transcript(for: meetingID).count, 1)
+        XCTAssertNil(store.lastError)
+    }
+
+    func testMeetingHeaderWriteSurvivesReopening() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kanban-transcript-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let meetingID = UUID()
+
+        do {
+            let store = LocalStore(url: url)
+            store.upsertMeeting(Meeting(id: meetingID, title: "Long", status: .completed))
+            store.saveTranscript([TranscriptSegment(start: 0, end: 4, text: "hello")], for: meetingID)
+            store.updateMeeting(meetingID) { $0.status = .failed }
+        }
+
+        let reopened = LocalStore(url: url)
+        XCTAssertEqual(reopened.transcript(for: meetingID).first?.text, "hello")
+        XCTAssertEqual(reopened.meeting(meetingID)?.status, .failed)
     }
 }

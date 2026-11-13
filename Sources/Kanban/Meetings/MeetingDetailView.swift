@@ -30,6 +30,8 @@ struct MeetingDetailView: View {
                     ProcessingPanel(progress: progress, meeting: meeting)
                 } else if meeting.status == .failed {
                     failurePanel
+                } else if [.queued, .uploading, .transcribing, .analyzing].contains(meeting.status) {
+                    interruptedPanel
                 } else if meeting.status == .readyToProcess || meeting.status == .localOnly {
                     unprocessedPanel
                 }
@@ -79,11 +81,15 @@ struct MeetingDetailView: View {
                 Menu {
                     MeetingActions(meeting: meeting, confirmingDelete: $confirmingDelete)
                 } label: {
-                    Image(systemName: "ellipsis").font(.system(size: 10))
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 10))
+                        .frame(width: 20, height: 20)
+                        .contentShape(Rectangle())
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
+                .accessibilityLabel("Meeting actions")
             }
 
             HStack(spacing: 6) {
@@ -221,6 +227,7 @@ struct MeetingDetailView: View {
                         .textFieldStyle(.plain)
                         .font(Theme.mono(11))
                         .foregroundStyle(theme.ink)
+                        .accessibilityLabel("Search transcript")
                     Text("\(filteredTranscript.count) / \(transcript.count)")
                         .font(Theme.mono(9.5))
                         .monospacedDigit()
@@ -230,8 +237,14 @@ struct MeetingDetailView: View {
                 .padding(.vertical, 5)
                 .background(theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-                    .strokeBorder(theme.line, lineWidth: Theme.Metric.hairline))
+                    .strokeBorder(theme.lineStrong, lineWidth: Theme.Metric.hairline))
 
+                if filteredTranscript.isEmpty {
+                    Text("No segments match “\(transcriptQuery)”.")
+                        .font(Theme.body)
+                        .foregroundStyle(theme.inkTertiary)
+                        .padding(.top, 2)
+                } else {
                 // Capped so an hour-long meeting cannot make this view expensive.
                 LazyVStack(alignment: .leading, spacing: 9) {
                     ForEach(filteredTranscript.prefix(400)) { segment in
@@ -240,6 +253,7 @@ struct MeetingDetailView: View {
                 }
                 if filteredTranscript.count > 400 {
                     MicroLabel("+ \(filteredTranscript.count - 400) more segments")
+                }
                 }
             }
         }
@@ -257,6 +271,12 @@ struct MeetingDetailView: View {
         Panel {
             VStack(alignment: .leading, spacing: 8) {
                 MicroLabel(meeting.status == .localOnly ? "saved locally" : "ready to process")
+                if let reason = meeting.failureReason, !reason.isEmpty {
+                    Text(reason)
+                        .font(Theme.mono(10))
+                        .foregroundStyle(theme.signal)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Text(meeting.status == .localOnly
                      ? "This recording is kept on this Mac and will not be uploaded."
                      : "This recording is saved on this Mac and has not been transcribed yet.")
@@ -265,17 +285,45 @@ struct MeetingDetailView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 if app.settings.backendIsConfigured {
-                    HStack(spacing: 6) {
-                        Button(app.sync.connection.isOnline ? "PROCESS" : "PROCESS WHEN ONLINE") {
-                            app.processRecording(meeting.id)
-                        }
-                        .buttonStyle(PanelButtonStyle(prominent: true))
-                        if !app.sync.connection.isOnline {
-                            MicroLabel("vps offline")
+                    if meeting.status == .localOnly {
+                        // Respect the earlier decision, but leave an explicit way back.
+                        Button("UPLOAD ANYWAY") { app.processRecording(meeting.id) }
+                            .buttonStyle(PanelButtonStyle())
+                    } else {
+                        HStack(spacing: 6) {
+                            Button(app.sync.connection.isOnline ? "PROCESS" : "PROCESS WHEN ONLINE") {
+                                app.processRecording(meeting.id)
+                            }
+                            .buttonStyle(PanelButtonStyle(prominent: true))
+                            if !app.sync.connection.isOnline {
+                                MicroLabel("vps offline")
+                            }
                         }
                     }
                 } else {
                     Text("Set a VPS URL in Settings to transcribe and analyse it.")
+                        .font(Theme.mono(9.5))
+                        .foregroundStyle(theme.inkTertiary)
+                }
+            }
+        }
+    }
+
+    /// A job that was in flight when the app closed: the local processor no longer has
+    /// its progress, but the recording is still here and can be sent again.
+    private var interruptedPanel: some View {
+        Panel {
+            VStack(alignment: .leading, spacing: 8) {
+                MicroLabel("processing interrupted")
+                Text("This meeting was being processed when the app last closed. You can send it again.")
+                    .font(Theme.body)
+                    .foregroundStyle(theme.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if meeting.audioFilename != nil, app.settings.backendIsConfigured {
+                    Button("RESUME PROCESSING") { app.processRecording(meeting.id) }
+                        .buttonStyle(PanelButtonStyle(prominent: true))
+                } else if meeting.audioFilename == nil {
+                    Text("The recording is no longer on this Mac, so it cannot be resumed.")
                         .font(Theme.mono(9.5))
                         .foregroundStyle(theme.inkTertiary)
                 }
@@ -344,11 +392,27 @@ private struct TranscriptRow: View {
 
 // MARK: - Processing
 
-/// The pipeline checklist. Steps are ticked as the server reports them.
+/// The pipeline checklist. Steps are ticked as the server reports them; the running
+/// stage is the only one in full ink and the rest stay dim until reached.
 struct ProcessingPanel: View {
     @Environment(\.theme) private var theme
+    @Environment(AppModel.self) private var app
     let progress: MeetingProcessor.Progress
     let meeting: Meeting
+
+    private struct Stage: Identifiable {
+        let status: MeetingStatus
+        let label: String
+        var id: MeetingStatus { status }
+    }
+
+    private var stages: [Stage] {
+        [Stage(status: .queued, label: "QUEUE"),
+         Stage(status: .uploading, label: "UPLOAD"),
+         Stage(status: .transcribing, label: "TRANSCRIPTION"),
+         Stage(status: .analyzing, label: "ANALYSIS"),
+         Stage(status: .completed, label: "ACTION ITEMS")]
+    }
 
     var body: some View {
         Panel {
@@ -360,17 +424,19 @@ struct ProcessingPanel: View {
                         .font(Theme.mono(10, weight: .medium))
                         .tracking(0.8)
                         .foregroundStyle(theme.ink)
+                    if progress.status.isProcessing {
+                        Button("CANCEL") { app.processor.cancel(meeting.id) }
+                            .buttonStyle(PanelButtonStyle(compact: true))
+                    }
                 }
 
                 Rule()
 
-                step("RECORDING", .completed)
-                step("UPLOAD", .uploading,
-                     trailing: progress.status == .uploading
-                        ? "\(Int(progress.uploadFraction * 100))%" : nil)
-                step("TRANSCRIPTION", .transcribing)
-                step("MEETING ANALYSIS", .analyzing)
-                step("ACTION ITEMS", .completed, isFinal: true)
+                ForEach(stages) { stage in
+                    step(stage.label, stage.status,
+                         trailing: stage.status == .uploading && progress.status == .uploading
+                            ? "\(Int(progress.uploadFraction * 100))%" : nil)
+                }
 
                 if let detail = progress.detail {
                     Text(detail)
@@ -383,18 +449,18 @@ struct ProcessingPanel: View {
     }
 
     /// ✓ done · ● running · ○ pending
-    private func step(_ label: String, _ stage: MeetingStatus,
-                      trailing: String? = nil, isFinal: Bool = false) -> some View {
-        let state = state(for: stage, isFinal: isFinal)
+    private func step(_ label: String, _ stage: MeetingStatus, trailing: String? = nil) -> some View {
+        let state = state(for: stage)
         return HStack(spacing: 8) {
             Text(state.glyph)
                 .font(Theme.mono(11))
-                .foregroundStyle(state.isPending ? theme.inkTertiary : theme.ink)
+                .foregroundStyle(state == .done ? theme.inkSecondary
+                                 : state == .running ? theme.ink : theme.inkTertiary)
                 .frame(width: 10)
             Text(label)
-                .font(Theme.mono(10.5))
+                .font(Theme.mono(10.5, weight: state == .running ? .medium : .regular))
                 .tracking(0.6)
-                .foregroundStyle(state.isPending ? theme.inkTertiary : theme.ink)
+                .foregroundStyle(state == .pending ? theme.inkTertiary : theme.ink)
             Spacer()
             if let trailing {
                 Text(trailing)
@@ -403,6 +469,8 @@ struct ProcessingPanel: View {
                     .foregroundStyle(theme.inkSecondary)
             }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label): \(state.label)")
     }
 
     private enum StepState {
@@ -414,14 +482,20 @@ struct ProcessingPanel: View {
             case .pending: return "○"
             }
         }
-        var isPending: Bool { self == .pending }
+        var label: String {
+            switch self {
+            case .done: return "done"
+            case .running: return "running"
+            case .pending: return "waiting"
+            }
+        }
     }
 
-    private func state(for stage: MeetingStatus, isFinal: Bool) -> StepState {
-        let order: [MeetingStatus] = [.queued, .uploading, .transcribing, .analyzing, .completed]
+    private func state(for stage: MeetingStatus) -> StepState {
+        if progress.status == .completed { return .done }
+        let order: [MeetingStatus] = stages.map(\.status)
         let currentIndex = order.firstIndex(of: progress.status) ?? 0
-        if isFinal { return progress.status == .completed ? .done : .pending }
-        guard let stageIndex = order.firstIndex(of: stage) else { return .done }
+        guard let stageIndex = order.firstIndex(of: stage) else { return .pending }
         if stageIndex < currentIndex { return .done }
         if stageIndex == currentIndex { return .running }
         return .pending

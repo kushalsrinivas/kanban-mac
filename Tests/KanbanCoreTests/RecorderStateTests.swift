@@ -20,7 +20,13 @@ final class RecorderStateTests: XCTestCase {
         var stopError: CaptureError?
         var bytes: Int64 = 4096
         var peak: Float = 0.6
+        /// When true, `start` suspends at an await until `releaseStart()` — the same
+        /// window in which the real engine is showing permission prompts.
+        var suspendsStart = false
+        private(set) var startEntered = false
+        private var startContinuation: CheckedContinuation<Void, Never>?
         private(set) var cancelCount = 0
+        private(set) var closeKeepingFileCount = 0
         private(set) var startedURL: URL?
 
         static func probeSources(_ request: CaptureRequest) async -> CaptureSources {
@@ -30,11 +36,20 @@ final class RecorderStateTests: XCTestCase {
         func requestPermissions(_ request: CaptureRequest) async -> CaptureSources { sources }
 
         func start(to url: URL, request: CaptureRequest) async throws {
+            startEntered = true
+            if suspendsStart {
+                await withCheckedContinuation { startContinuation = $0 }
+            }
             if let startError { throw startError }
             startedURL = url
             isRecording = true
             // Pretend a file appeared, the way the real engine would.
             try? Data(repeating: 0, count: Int(bytes)).write(to: url)
+        }
+
+        func releaseStart() {
+            startContinuation?.resume()
+            startContinuation = nil
         }
 
         func pause() throws { isPaused = true }
@@ -48,6 +63,12 @@ final class RecorderStateTests: XCTestCase {
             isRecording = false
             return CaptureResult(fileURL: startedURL ?? URL(fileURLWithPath: "/dev/null"),
                                  duration: 42, byteCount: bytes, peakLevel: peak)
+        }
+
+        func closeKeepingFile() async {
+            closeKeepingFileCount += 1
+            isRecording = false
+            isPaused = false
         }
 
         func cancel() async {
@@ -120,6 +141,10 @@ final class RecorderStateTests: XCTestCase {
         let (store, engine, recorder) = makeRecorder()
         await recorder.start()
         let id = recorder.currentMeetingID!
+        let filename = store.meeting(id)?.audioFilename
+        defer {
+            if let filename { try? FileManager.default.removeItem(at: KanbanPaths.recordingURL(filename: filename)) }
+        }
         engine.stopError = .engine("the engine fell over")
 
         await recorder.stop()
@@ -128,7 +153,27 @@ final class RecorderStateTests: XCTestCase {
         XCTAssertNil(recorder.currentMeetingID)
         XCTAssertEqual(store.meeting(id)?.status, .failed)
         XCTAssertNotNil(store.meeting(id)?.failureReason)
-        XCTAssertGreaterThan(engine.cancelCount, 0, "the engine must be forced down")
+        XCTAssertGreaterThan(engine.closeKeepingFileCount, 0, "the engine must be forced down")
+        XCTAssertEqual(engine.cancelCount, 0, "a failed stop must keep the audio file")
+        XCTAssertEqual(store.meeting(id)?.audioFilename, filename)
+        if let filename {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: KanbanPaths.recordingURL(filename: filename).path))
+        }
+    }
+
+    func testStopFailureClearsTheFilenameWhenTheFileIsAlreadyGone() async {
+        let (store, engine, recorder) = makeRecorder()
+        await recorder.start()
+        let id = recorder.currentMeetingID!
+        let filename = store.meeting(id)!.audioFilename!
+        try? FileManager.default.removeItem(at: KanbanPaths.recordingURL(filename: filename))
+        engine.stopError = .engine("the file vanished")
+
+        await recorder.stop()
+
+        XCTAssertNil(store.meeting(id)?.audioFilename,
+                     "a missing file must not stay queued for upload")
+        XCTAssertEqual(store.meeting(id)?.status, .failed)
     }
 
     func testStopWorksEvenIfTheEngineThinksItIsNotRecording() async {
@@ -146,14 +191,66 @@ final class RecorderStateTests: XCTestCase {
         let (store, engine, recorder) = makeRecorder()
         await recorder.start()
         let id = recorder.currentMeetingID!
+        let filename = store.meeting(id)?.audioFilename
+        defer {
+            if let filename { try? FileManager.default.removeItem(at: KanbanPaths.recordingURL(filename: filename)) }
+        }
 
         await recorder.forceStop()
 
         XCTAssertEqual(recorder.phase, .idle)
         XCTAssertNil(recorder.currentMeetingID)
         XCTAssertEqual(recorder.level, 0)
-        XCTAssertEqual(engine.cancelCount, 1)
+        XCTAssertEqual(engine.closeKeepingFileCount, 1, "force stop must not delete the audio")
+        XCTAssertEqual(engine.cancelCount, 0)
+        XCTAssertEqual(store.meeting(id)?.status, .readyToProcess,
+                       "a manually stopped recording is recoverable, not a dead end")
+        XCTAssertEqual(store.meeting(id)?.audioFilename, filename)
+        if let filename {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: KanbanPaths.recordingURL(filename: filename).path))
+        }
+    }
+
+    func testForceStopClearsTheFilenameWhenNoFileWasWritten() async {
+        let (store, engine, recorder) = makeRecorder()
+        engine.bytes = 0
+        await recorder.start()
+        let id = recorder.currentMeetingID!
+        let filename = store.meeting(id)?.audioFilename
+        defer {
+            if let filename { try? FileManager.default.removeItem(at: KanbanPaths.recordingURL(filename: filename)) }
+        }
+
+        await recorder.forceStop()
+
         XCTAssertEqual(store.meeting(id)?.status, .failed)
+        XCTAssertNil(store.meeting(id)?.audioFilename,
+                     "no dangling filename for the uploader to retry forever")
+    }
+
+    /// C3: STOP while the permission prompts are up used to let the recording start
+    /// afterwards, with a meeting row nobody asked for.
+    func testStopDuringPreparingCreatesNoMeetingAndCancelsTheEngine() async {
+        let (store, engine, recorder) = makeRecorder()
+        engine.suspendsStart = true
+
+        let starting = Task { await recorder.start() }
+        for _ in 0..<200 where !engine.startEntered { await Task.yield() }
+        XCTAssertTrue(engine.startEntered)
+        XCTAssertEqual(recorder.phase, .preparing)
+
+        await recorder.stop()
+        engine.releaseStart()
+        await starting.value
+
+        XCTAssertTrue(store.meetings.isEmpty, "a stopped start must not file a meeting")
+        XCTAssertNil(recorder.currentMeetingID)
+        XCTAssertEqual(recorder.phase, .idle)
+        XCTAssertGreaterThan(engine.cancelCount, 0, "the engine must be torn down")
+        if let url = engine.startedURL {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: url.path),
+                           "the abandoned partial file must not be left behind")
+        }
     }
 
     func testForceStopIsSafeWhenNothingIsRecording() async {
@@ -174,6 +271,27 @@ final class RecorderStateTests: XCTestCase {
         XCTAssertEqual(recorder.phase, .idle)
         XCTAssertNil(recorder.lastFinished)
         XCTAssertEqual(store.meeting(id)?.status, .failed)
+        XCTAssertNil(store.meeting(id)?.audioFilename, "nothing on disk means nothing to retry")
+    }
+
+    /// The pause arithmetic, on a fake clock: elapsed must not keep counting while
+    /// the engine is paused, and resume must add only the run time.
+    func testElapsedClockFreezesWhilePaused() {
+        let clock = ElapsedClock()
+        let t0 = Date(timeIntervalSinceReferenceDate: 1_000)
+
+        clock.start(at: t0)
+        XCTAssertEqual(clock.elapsed(at: t0.addingTimeInterval(10)), 10, accuracy: 0.001)
+
+        clock.pause(at: t0.addingTimeInterval(12))
+        XCTAssertEqual(clock.elapsed(at: t0.addingTimeInterval(100)), 12, accuracy: 0.001,
+                       "paused time is not recording time")
+
+        clock.resume(at: t0.addingTimeInterval(100))
+        XCTAssertEqual(clock.elapsed(at: t0.addingTimeInterval(105)), 17, accuracy: 0.001)
+
+        clock.reset()
+        XCTAssertEqual(clock.elapsed(at: t0.addingTimeInterval(500)), 0)
     }
 
     func testFailedStartLeavesNoRecordingBehind() async {

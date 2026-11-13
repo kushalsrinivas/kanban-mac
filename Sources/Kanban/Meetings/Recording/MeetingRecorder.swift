@@ -39,6 +39,10 @@ final class MeetingRecorder: AudioCaptureDelegate {
     /// without this the panel reads ACTIVE while nothing arrives.
     private(set) var noSignalHint: String?
     private var silentSince: TimeInterval?
+    /// Bumped by every start and every teardown. `start()` re-reads it after each
+    /// await, so a STOP or FORCE STOP during the permission prompts cannot leave a
+    /// meeting row behind or start recording after the user asked it to stop.
+    private var generation: UInt64 = 0
     /// The meeting row being recorded into, so the menu bar and widget can show it.
     private(set) var currentMeetingID: UUID?
 
@@ -92,6 +96,8 @@ final class MeetingRecorder: AudioCaptureDelegate {
 
     func start() async {
         guard phase == .idle else { return }
+        generation &+= 1
+        let token = generation
         phase = .preparing
         lastError = nil
         lastFinished = nil
@@ -105,8 +111,19 @@ final class MeetingRecorder: AudioCaptureDelegate {
             try await engine.start(to: KanbanPaths.recordingURL(filename: filename),
                                    request: captureRequest)
         } catch {
-            phase = .idle
-            lastError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            if token == generation {
+                phase = .idle
+                lastError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            }
+            return
+        }
+
+        // STOP, FORCE STOP or DISCARD landed while the engine was still resolving
+        // permissions. There is no meeting row yet, so throw the file away and leave
+        // the phase exactly as the teardown left it. A newer START that already owns
+        // the engine is left alone.
+        guard token == generation else {
+            if phase == .idle { await engine.cancel() }
             return
         }
 
@@ -163,17 +180,19 @@ final class MeetingRecorder: AudioCaptureDelegate {
     /// caller can hand it to the processor; `nil` means there is nothing to upload.
     @discardableResult
     func stop() async -> Finished? {
+        generation &+= 1
         let meetingID = currentMeetingID
         var result: CaptureResult?
+        var failure: String?
 
         do {
             result = try await engine.stop()
         } catch {
-            // Not fatal. Force the engine down so no capture is left running.
-            await engine.cancel()
-            if isRecording {
-                lastError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
-            }
+            failure = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            if isRecording { lastError = failure }
+            // The file may still hold everything up to the failure. Keep it rather
+            // than unlinking the only copy of the meeting.
+            await engine.closeKeepingFile()
         }
 
         defer {
@@ -186,14 +205,18 @@ final class MeetingRecorder: AudioCaptureDelegate {
             store.flush()
         }
 
-        guard let meetingID, store.meeting(meetingID) != nil else { return nil }
+        guard let meetingID, let meeting = store.meeting(meetingID) else { return nil }
 
         guard let result, result.byteCount > 0 else {
-            // Nothing usable was captured; do not offer to upload an empty file.
-            let reason = lastError ?? "No audio was captured."
+            // Nothing usable came back from the engine. Keep the bytes only when a
+            // non-empty file really exists; otherwise clear the filename so the
+            // upload queue cannot retry a file that is gone forever.
+            let reason = failure ?? lastError ?? "No audio was captured."
+            let bytes = recordingBytes(meeting.audioFilename)
             store.updateMeeting(meetingID) {
                 $0.status = .failed
                 $0.failureReason = reason
+                if bytes <= 0 { $0.audioFilename = nil }
             }
             lastError = reason
             return nil
@@ -218,6 +241,14 @@ final class MeetingRecorder: AudioCaptureDelegate {
         return finished
     }
 
+    /// Bytes actually on disk for a meeting's recording. Zero means there is nothing
+    /// worth keeping, so the filename must be cleared rather than retried forever.
+    private func recordingBytes(_ filename: String?) -> Int64 {
+        guard let filename else { return 0 }
+        let path = KanbanPaths.recordingURL(filename: filename).path
+        return (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int64) ?? 0
+    }
+
     /// What to tell someone whose recording came out as pure silence.
     private static func silenceAdvice(_ sources: CaptureSources) -> String {
         sources.microphone.isWorking
@@ -231,11 +262,21 @@ final class MeetingRecorder: AudioCaptureDelegate {
     /// Escape hatch: tears everything down unconditionally and keeps whatever was
     /// written. Wired to the menu bar so a wedged recording is always recoverable.
     func forceStop() async {
-        await engine.cancel()
-        if let meetingID = currentMeetingID, store.meeting(meetingID) != nil {
+        generation &+= 1
+        let meetingID = currentMeetingID
+        // Keep the partial file: a wedged recording is still a recording.
+        await engine.closeKeepingFile()
+        if let meetingID, let meeting = store.meeting(meetingID) {
+            let bytes = recordingBytes(meeting.audioFilename)
             store.updateMeeting(meetingID) {
-                $0.status = .failed
-                $0.failureReason = "Recording was stopped manually."
+                if bytes > 0 {
+                    $0.status = .readyToProcess
+                    $0.failureReason = "Recording was stopped manually. The audio up to that point was kept."
+                } else {
+                    $0.status = .failed
+                    $0.audioFilename = nil
+                    $0.failureReason = "Recording was stopped manually and no audio was written."
+                }
             }
         }
         currentMeetingID = nil
@@ -249,6 +290,7 @@ final class MeetingRecorder: AudioCaptureDelegate {
 
     /// Discards the recording entirely, including the file.
     func discard() async {
+        generation &+= 1
         let meetingID = currentMeetingID ?? lastFinished?.meetingID
         await engine.cancel()
         if let meetingID {

@@ -117,8 +117,40 @@ struct KanbanCommands: Commands {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor var model: AppModel?
+    private var isTerminating = false
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    /// Quitting while a meeting is being recorded needs to wait: the audio file's
+    /// trailing frames are only flushed when the engine stops, and a detached Task
+    /// from `applicationWillTerminate` never gets to run before the process exits.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let model = MainActor.assumeIsolated { self.model }
+        guard let model, model.recorder.isRecording else { return .terminateNow }
+        // A second ⌘Q while the first stop is unwinding must not reply twice.
+        guard !isTerminating else { return .terminateLater }
+        isTerminating = true
+
+        Task { @MainActor in
+            // A task group would still wait for the stop task at scope exit, which
+            // is the hang this watchdog exists to break. Race a continuation instead.
+            let once = Once()
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let stop = Task { @MainActor in
+                    await model.shutdownAndWait()
+                    once.run { continuation.resume() }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+                    once.run {
+                        stop.cancel()
+                        continuation.resume()
+                    }
+                }
+            }
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated { model?.shutdown() }
@@ -132,6 +164,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidBecomeActive(_ notification: Notification) {
         // One connectivity check per activation, rather than a background poll.
         MainActor.assumeIsolated { model?.applicationDidActivate() }
+    }
+}
+
+// MARK: - One-shot
+
+/// Runs a continuation exactly once, whichever of the stop or timeout wins.
+private final class Once: @unchecked Sendable {
+    private let lock = NSLock()
+    private var finished = false
+
+    func run(_ body: () -> Void) {
+        lock.lock()
+        let first = !finished
+        finished = true
+        lock.unlock()
+        if first { body() }
     }
 }
 

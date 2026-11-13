@@ -13,8 +13,26 @@ actor APIClient {
         var token: String
         var timeout: TimeInterval
 
+        init(baseURL: URL, token: String, timeout: TimeInterval) {
+            self.baseURL = Self.normalized(baseURL)
+            self.token = token
+            self.timeout = timeout
+        }
+
         /// Versioned base, e.g. https://host/api/v1
-        var apiRoot: URL { baseURL.appendingPathComponent("api/v1") }
+        var apiRoot: URL {
+            URL(string: baseURL.absoluteString + "/api/v1") ?? baseURL
+        }
+
+        /// A pasted URL often already ends in /api/v1; appending it again would make
+        /// every route 404. Trailing slashes are dropped too.
+        private static func normalized(_ url: URL) -> URL {
+            var string = url.absoluteString
+            while string.hasSuffix("/") { string.removeLast() }
+            if string.lowercased().hasSuffix("/api/v1") { string.removeLast(7) }
+            while string.hasSuffix("/") { string.removeLast() }
+            return URL(string: string) ?? url
+        }
     }
 
     private var configuration: Configuration?
@@ -40,17 +58,20 @@ actor APIClient {
 
     // MARK: Health
 
-    func health() async -> Bool {
-        guard configuration != nil else { return false }
+    func health() async -> HealthDTO? {
+        guard configuration != nil else { return nil }
         do {
-            let _: HealthDTO = try await send(.get, "/health", timeout: 6)
-            return true
+            return try await send(.get, "/health", timeout: 6)
         } catch {
-            return false
+            return nil
         }
     }
 
-    struct HealthDTO: Codable { var status: String }
+    struct HealthDTO: Codable {
+        var status: String
+        var database: Bool?
+        var auth: Bool?
+    }
 
     // MARK: Tasks
 
@@ -139,11 +160,13 @@ actor APIClient {
 
     /// Replays a queued mutation verbatim. Returns the response body for reconciliation.
     func replay(method: String, path: String, body: Data?) async throws -> Data {
-        guard let configuration else { throw APIError.unsupported("no VPS configured") }
-        var request = URLRequest(url: configuration.apiRoot.appendingPathComponent(String(path.dropFirst())))
+        var request = URLRequest(url: try url(for: path))
         request.httpMethod = method
-        request.timeoutInterval = configuration.timeout
-        request.setValue("Bearer \(configuration.token)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = configuration?.timeout ?? 20
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let token = configuration?.token, !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         if let body {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -158,13 +181,21 @@ actor APIClient {
     private enum Method: String { case get = "GET", post = "POST", patch = "PATCH", delete = "DELETE" }
     private struct EmptyBody: Encodable {}
 
-    private func request(_ method: Method, _ path: String, timeout: TimeInterval?) throws -> URLRequest {
+    /// One builder for every route, so replay and typed requests cannot drift.
+    private func url(for path: String) throws -> URL {
         guard let configuration else { throw APIError.unsupported("no VPS configured") }
         // Path may carry a query string, so build by string rather than appendingPathComponent.
         guard let url = URL(string: configuration.apiRoot.absoluteString + path) else {
-            throw APIError.badRequest("bad path \(path)")
+            // Local, not a server rejection: never let the outbox treat this as a
+            // droppable 400.
+            throw APIError.unsupported("bad path \(path)")
         }
-        var request = URLRequest(url: url)
+        return url
+    }
+
+    private func request(_ method: Method, _ path: String, timeout: TimeInterval?) throws -> URLRequest {
+        guard let configuration else { throw APIError.unsupported("no VPS configured") }
+        var request = URLRequest(url: try url(for: path))
         request.httpMethod = method.rawValue
         request.timeoutInterval = timeout ?? configuration.timeout
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -244,7 +275,7 @@ private final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate, @u
 
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     didSendBodyData bytesSent: Int64, totalBytesSent: Int64,
-                    totalBytesExpectedToSend totalBytesExpectedToSend: Int64) {
+                    totalBytesExpectedToSend: Int64) {
         guard totalBytesExpectedToSend > 0 else { return }
         onProgress?(Double(totalBytesSent) / Double(totalBytesExpectedToSend))
     }

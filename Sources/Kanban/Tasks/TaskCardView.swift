@@ -17,7 +17,7 @@ struct TaskCardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 7) {
-                CompletionBox(isDone: task.isDone, action: onToggleComplete)
+                CompletionBox(isDone: task.isDone, title: task.title, action: onToggleComplete)
                     .padding(.top, 1)
 
                 Text(task.title)
@@ -90,7 +90,7 @@ struct TaskCardView: View {
             // Selection reads as a machined notch on the left edge, not a highlight.
             if isSelected {
                 RoundedRectangle(cornerRadius: 1)
-                    .fill(theme.ink)
+                    .fill(theme.accent)
                     .frame(width: 2.5)
                     .padding(.vertical, 8)
                     .padding(.leading, 1)
@@ -98,15 +98,15 @@ struct TaskCardView: View {
         }
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
-                .strokeBorder(isSelected ? theme.lineStrong : theme.line,
+                .strokeBorder(isSelected || isHovering ? theme.lineStrong : theme.line,
                               lineWidth: Theme.Metric.hairline)
         )
         .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+        .transition(.opacity)
         .onHover { isHovering = $0 }
-        .opacity(isHovering && !isSelected ? 0.94 : 1)
         .onTapGesture(count: 2, perform: onOpen)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(task.title), \(task.priority.longLabel), \(task.status.label)")
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(named: "Open") { onOpen() }
     }
 }
 
@@ -114,6 +114,7 @@ struct TaskCardView: View {
 private struct CompletionBox: View {
     @Environment(\.theme) private var theme
     let isDone: Bool
+    let title: String
     let action: () -> Void
 
     var body: some View {
@@ -132,8 +133,12 @@ private struct CompletionBox: View {
                             .foregroundStyle(theme.panel)
                     }
                 }
+                // The glyph stays 11pt; the hit region grows by 5pt on each side
+                // without changing the card's layout.
+                .contentShape(Rectangle().inset(by: -5))
         }
         .buttonStyle(.plain)
         .help(isDone ? "Reopen" : "Complete")
+        .accessibilityLabel(isDone ? "Reopen \(title)" : "Complete \(title)")
     }
 }

@@ -2,7 +2,8 @@
 # Copies the wire fixtures this repo generates into the backend repo, so both
 # suites assert against the same bytes.
 #
-#   1. Run the Swift generator:  xcodebuild ... -only-testing:KanbanTests/FixtureGenerator
+#   1. Run the Swift generator:
+#        KANBAN_WRITE_FIXTURES=1 xcodebuild ... -only-testing:KanbanTests/FixtureGenerator
 #   2. Run this script.
 #   3. Run the backend suite:    cd ../kanban-backend && pytest
 set -euo pipefail
