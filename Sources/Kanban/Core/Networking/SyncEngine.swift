@@ -19,7 +19,7 @@ final class SyncEngine {
 
         var label: String {
             switch self {
-            case .unconfigured: return "LOCAL"
+            case .unconfigured: return "LOCAL ONLY"
             case .checking: return "CHECKING"
             case .online: return "CONNECTED"
             case .offline: return "OFFLINE"
@@ -126,9 +126,9 @@ final class SyncEngine {
     /// queued while a request is in flight are picked up by the same drain rather than
     /// waiting for the next activation.
     ///
-    /// Stops at the first failure worth retrying. A 400/409/422 rejection is dropped
-    /// because the body itself is bad; auth and routing failures hold the queue so a
-    /// token rotation or a wrong base URL cannot delete queued edits.
+    /// Stops at the first failure worth retrying. A 400/422 rejection is dropped
+    /// because the body itself is bad; auth, routing, conflict and transient failures
+    /// hold the queue so a token rotation or a wrong base URL cannot delete edits.
     ///
     /// - Returns: true when the drain stopped with entries still queued.
     @discardableResult

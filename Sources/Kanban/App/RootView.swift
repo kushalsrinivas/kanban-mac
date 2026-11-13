@@ -44,11 +44,23 @@ struct RootView: View {
         .preferredColorScheme(app.settings.colorScheme)
         .onAppear {
             app.systemIsDark = colorScheme == .dark
-            focus = .board
+            // On a genuinely empty board the hint says to type; make that true.
+            let live = app.store.tasks.filter { !$0.isArchived }
+            focus = live.isEmpty ? .quickAdd : .board
         }
         .onChange(of: colorScheme) { _, new in app.systemIsDark = new == .dark }
         .onChange(of: app.quickAddRequestID) { _, _ in focus = .quickAdd }
         .onChange(of: app.isSearchActive) { _, active in focus = active ? .search : .board }
+        .onChange(of: app.inspector) { _, inspector in
+            // Board shortcuts must not stay armed while the inspector is being
+            // edited, and closing it should give the board its keyboard back.
+            switch inspector {
+            case .task:
+                if focus == .board { focus = nil }
+            case .hidden:
+                if focus == nil { focus = .board }
+            }
+        }
         .overlay {
             if app.isPaletteOpen {
                 CommandPaletteView(isPresented: $app.isPaletteOpen)
@@ -161,6 +173,7 @@ struct RootView: View {
             .padding(.top, 10)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: app.inspector == .hidden)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func arrow(_ direction: MoveCommandDirection) -> KeyPress.Result {
@@ -189,11 +202,17 @@ private struct TitleBar: View {
                 .foregroundStyle(theme.ink)
 
             if let message = app.transientMessage {
-                Text(message)
-                    .font(Theme.mono(9.5, weight: .medium))
-                    .tracking(0.8)
-                    .foregroundStyle(theme.inkTertiary)
-                    .padding(.bottom, 2)
+                HStack(spacing: 8) {
+                    Text(message)
+                        .font(Theme.mono(9.5, weight: .medium))
+                        .tracking(0.8)
+                        .foregroundStyle(theme.inkTertiary)
+                    if app.canUndo {
+                        Button("UNDO") { app.undoLast() }
+                            .buttonStyle(PanelButtonStyle(compact: true))
+                    }
+                }
+                .padding(.bottom, 2)
             }
 
             Spacer(minLength: 0)
@@ -245,10 +264,16 @@ private struct TitleBar: View {
 private struct ConnectionBadge: View {
     @Environment(\.theme) private var theme
     @Environment(AppModel.self) private var app
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         Button {
-            Task { await app.connect() }
+            if app.settings.backendIsConfigured {
+                Task { await app.connect() }
+            } else {
+                // Clicking LOCAL should take you to the thing it is missing.
+                openSettings()
+            }
         } label: {
             HStack(spacing: 5) {
                 StatusDot(dot)
@@ -279,7 +304,7 @@ private struct ConnectionBadge: View {
 
     private var helpText: String {
         switch app.sync.connection {
-        case .unconfigured: return "Running locally. Set a VPS URL in Settings."
+        case .unconfigured: return "Running locally. Click to open Settings."
         case .offline: return "VPS unreachable. Tasks and recording still work. Click to retry."
         case .checking: return "Checking the connection…"
         case .online:
@@ -306,6 +331,14 @@ private struct SectionTabs: View {
                             .font(Theme.mono(10.5, weight: active ? .semibold : .regular))
                             .tracking(1)
                         if let badge = badge(for: section) {
+                            if section == .meetings {
+                                // A count alone reads as "meetings"; the dot says an
+                                // item needs review.
+                                Circle()
+                                    .fill(theme.signal)
+                                    .overlay(Circle().strokeBorder(active ? theme.paper : .clear, lineWidth: 1))
+                                    .frame(width: 5, height: 5)
+                            }
                             Text(badge)
                                 .font(Theme.mono(9))
                                 .monospacedDigit()
@@ -319,6 +352,7 @@ private struct SectionTabs: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .help(helpText(for: section))
             }
             Spacer()
         }
@@ -335,9 +369,22 @@ private struct SectionTabs: View {
             return open > 0 ? String(format: "%02d", open) : nil
         case .meetings:
             let suggestions = app.openSuggestionCount
-            return suggestions > 0 ? "\(suggestions)!" : nil
+            return suggestions > 0 ? "\(suggestions)" : nil
         case .agent:
             return nil
+        }
+    }
+
+    private func helpText(for section: AppModel.Section) -> String {
+        switch section {
+        case .tasks:
+            return "\(app.store.counts().open) open tasks"
+        case .meetings:
+            let suggestions = app.openSuggestionCount
+            return suggestions == 0 ? "Meetings and recordings"
+                : "\(suggestions) task\(suggestions == 1 ? "" : "s") to review"
+        case .agent:
+            return "Agent console"
         }
     }
 }
@@ -389,6 +436,7 @@ private struct StatusFooter: View {
             MicroLabel("⌘N NEW")
             MicroLabel("⌘K COMMAND")
             MicroLabel("⌘F FIND")
+            MicroLabel("⏎ OPEN")
             MicroLabel("⌘1-4 COLUMN")
             MicroLabel("⌘R RECORD")
             Spacer(minLength: 0)

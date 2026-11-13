@@ -19,9 +19,9 @@ struct QuickAddBar: View {
 
             TextField("", text: $app.quickAddText,
                       prompt: Text("new task   !high  #tag  @friday  >todo")
-                        .font(Theme.mono(11.5)).foregroundStyle(theme.inkTertiary))
+                        .font(Theme.mono(12.5)).foregroundStyle(theme.inkTertiary))
                 .textFieldStyle(.plain)
-                .font(Theme.display(13.5))
+                .font(Theme.mono(12.5, weight: .medium))
                 .foregroundStyle(theme.ink)
                 .focused($focus, equals: .quickAdd)
                 .onSubmit(submit)

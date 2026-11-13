@@ -16,7 +16,18 @@ final class AppSettings {
 
     static let shared = AppSettings()
 
-    private let defaults = UserDefaults.standard
+    /// A named suite keeps UI tests and screenshot runs out of the real preferences.
+    private static func makeDefaults() -> UserDefaults {
+        #if DEBUG
+        if let suite = ProcessInfo.processInfo.environment["KANBAN_DEFAULTS_SUITE"],
+           !suite.isEmpty, let defaults = UserDefaults(suiteName: suite) {
+            return defaults
+        }
+        #endif
+        return .standard
+    }
+
+    private let defaults = AppSettings.makeDefaults()
 
     // Appearance
     var appearance: AppearanceChoice { didSet { set(appearance.rawValue, "appearance") } }
@@ -86,7 +97,7 @@ final class AppSettings {
     var autoUpload: Bool { didSet { set(autoUpload, "autoUpload") } }
 
     private init() {
-        let d = UserDefaults.standard
+        let d = defaults
         func string(_ key: String, _ fallback: String) -> String { d.string(forKey: key) ?? fallback }
         func bool(_ key: String, _ fallback: Bool) -> Bool { d.object(forKey: key) as? Bool ?? fallback }
         func int(_ key: String, _ fallback: Int) -> Int { d.object(forKey: key) as? Int ?? fallback }

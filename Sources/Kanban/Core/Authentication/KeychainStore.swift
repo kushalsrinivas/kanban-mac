@@ -6,7 +6,15 @@ import Security
 /// One generic-password item per key, scoped to this app's service identifier.
 enum KeychainStore {
 
-    private static let service = "com.kanban.app.credentials"
+    private static let service: String = {
+        #if DEBUG
+        if let override = ProcessInfo.processInfo.environment["KANBAN_KEYCHAIN_SERVICE"],
+           !override.isEmpty {
+            return override
+        }
+        #endif
+        return "com.kanban.app.credentials"
+    }()
 
     enum Key: String, CaseIterable {
         case apiToken = "api-token"

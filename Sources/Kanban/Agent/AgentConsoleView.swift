@@ -7,6 +7,7 @@ import SwiftUI
 struct AgentConsoleView: View {
     @Environment(\.theme) private var theme
     @Environment(AppModel.self) private var app
+    @Environment(\.openSettings) private var openSettings
     @FocusState.Binding var focus: FocusTarget?
 
     @State private var draft = ""
@@ -42,7 +43,7 @@ struct AgentConsoleView: View {
         Panel(padding: 0) {
             HStack(spacing: 0) {
                 block("STATUS", app.agent.statusLabel,
-                      tint: app.agent.isAvailable ? nil : theme.inkTertiary)
+                      tint: app.agent.isAvailable ? nil : theme.inkTertiary, width: 170)
                 VRule().padding(.vertical, 12)
                 block("OPEN", String(format: "%02d", app.store.counts().open))
                 VRule().padding(.vertical, 12)
@@ -65,7 +66,8 @@ struct AgentConsoleView: View {
         }
     }
 
-    private func block(_ label: String, _ value: String, tint: Color? = nil) -> some View {
+    private func block(_ label: String, _ value: String, tint: Color? = nil,
+                       width: CGFloat = 118) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             MicroLabel(label)
             Text(value)
@@ -74,7 +76,7 @@ struct AgentConsoleView: View {
                 .foregroundStyle(tint ?? theme.ink)
                 .lineLimit(1)
         }
-        .frame(width: 118, alignment: .leading)
+        .frame(width: width, alignment: .leading)
         .padding(.leading, 14)
     }
 
@@ -108,30 +110,44 @@ struct AgentConsoleView: View {
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("What do you want to do?")
-                .font(Theme.display(15))
-                .foregroundStyle(theme.inkSecondary)
+            if app.agent.isAvailable {
+                Text("What do you want to do?")
+                    .font(Theme.display(15))
+                    .foregroundStyle(theme.inkSecondary)
 
-            VStack(alignment: .leading, spacing: 5) {
-                ForEach(["What do I need to finish today?",
-                         "Move my API task into progress",
-                         "What did we decide about onboarding?",
-                         "Show me action items from this week's meetings"], id: \.self) { example in
-                    Button {
-                        draft = example
-                        focus = .agent
-                    } label: {
-                        Text("> \(example)")
-                            .font(Theme.mono(11))
-                            .foregroundStyle(theme.inkTertiary)
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(["What do I need to finish today?",
+                             "Move my API task into progress",
+                             "What did we decide about onboarding?",
+                             "Show me action items from this week's meetings"], id: \.self) { example in
+                        Button {
+                            draft = example
+                            focus = .agent
+                        } label: {
+                            Text("> \(example)")
+                                .font(Theme.mono(11))
+                                .foregroundStyle(theme.inkTertiary)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
+            } else {
+                Text("Ask about your board and meetings once the VPS is connected.")
+                    .font(Theme.display(15))
+                    .foregroundStyle(theme.inkSecondary)
             }
 
             if !app.settings.backendIsConfigured {
                 Rule().padding(.vertical, 4)
                 Text("The agent runs on your VPS. Set the server URL in Settings. Tasks and recording work without it.")
+                    .font(Theme.mono(9.5))
+                    .foregroundStyle(theme.inkTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("OPEN SETTINGS") { openSettings() }
+                    .buttonStyle(PanelButtonStyle(prominent: true, compact: true))
+            } else if !app.agent.isAvailable {
+                Rule().padding(.vertical, 4)
+                Text("The VPS is configured but unreachable, so the agent cannot answer right now.")
                     .font(Theme.mono(9.5))
                     .foregroundStyle(theme.inkTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -198,7 +214,8 @@ struct AgentConsoleView: View {
 
                 Button(action: send) { Text("SEND") }
                     .buttonStyle(PanelButtonStyle(prominent: true, compact: true))
-                    .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty || app.agent.isBusy)
+                    .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty
+                              || app.agent.isBusy || !app.agent.isAvailable)
             }
             .padding(.vertical, 10)
         }
@@ -279,7 +296,7 @@ private struct OperationCard: View {
                 Spacer()
                 if action.destructive {
                     Text("DESTRUCTIVE")
-                        .font(Theme.mono(8.5, weight: .semibold))
+                        .font(Theme.mono(9.5, weight: .semibold))
                         .tracking(0.6)
                         .foregroundStyle(theme.signal)
                 }

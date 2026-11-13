@@ -34,13 +34,14 @@ struct TaskCardView: View {
                 // marked, so the board never hides where something came from.
                 if task.source != .manual {
                     Text(task.source == .meeting ? "MTG" : "AGT")
-                        .font(Theme.mono(8, weight: .semibold))
+                        .font(Theme.mono(9.5, weight: .semibold))
                         .tracking(0.3)
                         .foregroundStyle(theme.inkSecondary)
                         .padding(.horizontal, 3)
                         .padding(.vertical, 1)
                         .overlay(RoundedRectangle(cornerRadius: 2)
                             .strokeBorder(theme.line, lineWidth: Theme.Metric.hairline))
+                        .help(task.source == .meeting ? "Came from a meeting" : "Created by the agent")
                 }
             }
 
@@ -98,13 +99,15 @@ struct TaskCardView: View {
         }
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
-                .strokeBorder(isSelected || isHovering ? theme.lineStrong : theme.line,
+                .strokeBorder(isSelected ? theme.ink
+                              : isHovering ? theme.inkSecondary : theme.lineStrong,
                               lineWidth: Theme.Metric.hairline)
         )
         .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
         .transition(.opacity)
         .onHover { isHovering = $0 }
         .onTapGesture(count: 2, perform: onOpen)
+        .help("Double-click to open")
         .accessibilityElement(children: .contain)
         .accessibilityAction(named: "Open") { onOpen() }
     }

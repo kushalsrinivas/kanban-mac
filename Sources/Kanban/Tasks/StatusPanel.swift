@@ -36,7 +36,7 @@ struct StatusPanel: View {
                 .monospacedDigit()
                 .foregroundStyle(tint ?? theme.ink)
         }
-        .frame(width: 96, alignment: .leading)
+        .frame(width: 84, alignment: .leading)
         .padding(.leading, 14)
         .accessibilityElement(children: .combine)
     }
@@ -48,18 +48,27 @@ struct SystemModule: View {
     @Environment(AppModel.self) private var app
 
     var body: some View {
-        Button { app.section = .agent } label: {
+        let reviewCount = app.openSuggestionCount
+        Button {
+            if let meeting = app.store.meetings.first(where: { $0.suggestedCount > 0 }) {
+                app.openMeeting(meeting.id)
+            } else {
+                app.section = .agent
+            }
+        } label: {
             HStack(spacing: 9) {
                 VStack(alignment: .leading, spacing: 2) {
-                    MicroLabel("agent")
+                    MicroLabel(reviewCount > 0 ? "review" : "agent")
                     HStack(spacing: 5) {
-                        StatusDot(dotState)
-                        Text(app.agent.statusLabel)
+                        StatusDot(reviewCount > 0 ? .alert : dotState)
+                        Text(reviewCount > 0
+                             ? "\(reviewCount) TASK\(reviewCount == 1 ? "" : "S")"
+                             : app.agent.statusLabel)
                             .font(Theme.mono(11, weight: .medium))
                             .tracking(0.8)
                             .foregroundStyle(theme.ink)
                     }
-                    Text(subtitle)
+                    Text(reviewCount > 0 ? "FROM MEETINGS" : subtitle)
                         .font(Theme.mono(9.5))
                         .foregroundStyle(theme.inkTertiary)
                         .lineLimit(1)
@@ -74,7 +83,7 @@ struct SystemModule: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Open the agent console")
+        .help(reviewCount > 0 ? "Review suggested tasks" : "Open the agent console")
     }
 
     private var dotState: StatusDot.State {
@@ -89,7 +98,10 @@ struct SystemModule: View {
 
     private var subtitle: String {
         if !app.agent.pending.isEmpty { return "\(app.agent.pending.count) TO CONFIRM" }
-        if app.openSuggestionCount > 0 { return "\(app.openSuggestionCount) SUGGESTED TASKS" }
+        if app.openSuggestionCount > 0 {
+            let count = app.openSuggestionCount
+            return "\(count) SUGGESTED TASK\(count == 1 ? "" : "S")"
+        }
         if app.sync.pendingCount > 0 { return "\(app.sync.pendingCount) QUEUED" }
         switch app.sync.connection {
         case .unconfigured: return "NO VPS SET"

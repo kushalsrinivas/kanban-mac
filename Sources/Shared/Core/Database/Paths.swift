@@ -5,7 +5,16 @@ public enum KanbanPaths {
 
     /// ~/Library/Application Support/Kanban — readable by the app and the widget extension
     /// without an App Group (and therefore without a provisioning profile).
+    ///
+    /// `KANBAN_SUPPORT_DIR` redirects it for UI tests and screenshot runs so they never
+    /// touch the real board.
     public static var supportDirectory: URL {
+        #if DEBUG
+        if let override = ProcessInfo.processInfo.environment["KANBAN_SUPPORT_DIR"],
+           !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        #endif
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
         return base.appendingPathComponent(folderName, isDirectory: true)

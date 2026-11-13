@@ -48,6 +48,22 @@ final class AppModel {
     var pendingSuggestion: SuggestionDraft?
     /// Task awaiting an explicit delete confirmation. Set by the inspector and menu.
     var deletionRequest: UUID?
+    /// The last reversible board action, surfaced as an UNDO button in the title bar.
+    private(set) var undoAction: UndoAction?
+
+    enum UndoAction: Equatable {
+        case archived(UUID)
+        case completed(UUID, TaskStatus)
+    }
+
+    var canUndo: Bool { undoAction != nil }
+    var undoLabel: String {
+        switch undoAction {
+        case .archived: return "Undo Archive"
+        case .completed: return "Undo Complete"
+        case nil: return "Undo"
+        }
+    }
 
     @ObservationIgnored private var transientWorkItem: DispatchWorkItem?
 
@@ -103,7 +119,15 @@ final class AppModel {
 
     func start() {
         settings.applyActivationPolicy()
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["KANBAN_DEMO_DATA"] == "1" {
+            DemoSeed.seedIfNeeded(store)
+        }
+        #endif
         store.flush()
+        #if DEBUG
+        ScreenshotDriver.runIfRequested(self)
+        #endif
         Task {
             await connect()
             await recorder.probe()
@@ -262,10 +286,12 @@ final class AppModel {
         do {
             if task.isDone {
                 try taskService.reopen(id)
+                undoAction = nil
                 flash("REOPENED")
             } else {
                 try taskService.complete(id)
-                flash("COMPLETED")
+                undoAction = .completed(id, task.status)
+                flash("COMPLETED", duration: 5)
             }
         } catch {
             flash("COULD NOT UPDATE TASK")
@@ -279,9 +305,31 @@ final class AppModel {
             try taskService.delete(id, hard: false)
             selection = next
             if next == nil, case .task = inspector { inspector = .hidden }
-            flash("ARCHIVED \(task.title.uppercased().prefix(24))")
+            undoAction = .archived(id)
+            flash("ARCHIVED \(task.title.uppercased().prefix(24))", duration: 5)
         } catch {
             flash("COULD NOT ARCHIVE TASK")
+        }
+    }
+
+    func undoLast() {
+        guard let action = undoAction else { return }
+        undoAction = nil
+        do {
+            switch action {
+            case .archived(let id):
+                try taskService.unarchive(id)
+                selection = id
+                openInspector(for: id)
+                flash("RESTORED")
+            case .completed(let id, let status):
+                try taskService.reopen(id, to: status)
+                selection = id
+                focusedStatus = status
+                flash("REOPENED")
+            }
+        } catch {
+            flash("COULD NOT UNDO")
         }
     }
 
@@ -290,6 +338,7 @@ final class AppModel {
         let next = neighbour(of: id)
         do {
             try taskService.delete(id, hard: true)
+            undoAction = nil
             selection = next
             if next == nil, case .task = inspector { inspector = .hidden }
             flash("DELETED")
@@ -581,7 +630,7 @@ final class AppModel {
 
     // MARK: Transient status line
 
-    func flash(_ message: String) {
+    func flash(_ message: String, duration: TimeInterval = 2.2) {
         transientMessage = message
         // VoiceOver users otherwise get no feedback for complete/archive/errors.
         NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested,
@@ -590,6 +639,6 @@ final class AppModel {
         transientWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in self?.transientMessage = nil }
         transientWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: item)
     }
 }

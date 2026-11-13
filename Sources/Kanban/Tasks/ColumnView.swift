@@ -10,6 +10,9 @@ struct ColumnView: View {
 
     let status: TaskStatus
     let tasks: [TaskItem]
+    /// Computed by BoardView so columns fill a wide window but never shrink below
+    /// the control-panel card width.
+    var width: CGFloat = Theme.Metric.columnWidth
 
     @State private var isColumnTargeted = false
 
@@ -36,7 +39,7 @@ struct ColumnView: View {
             }
             .scrollIndicators(.never)
         }
-        .frame(width: Theme.Metric.columnWidth)
+        .frame(width: width)
         .background(theme.panelAlt, in: RoundedRectangle(cornerRadius: Theme.Radius.panel, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.panel, style: .continuous)
@@ -75,6 +78,7 @@ struct ColumnView: View {
             app.focusedStatus = status
             if case .task = app.inspector { app.inspector = .task(task.id) }
         }
+        .id(task.id)
         .draggable(TaskTransfer(id: task.id.uuidString)) {
             DragPreview(title: task.title)
         }

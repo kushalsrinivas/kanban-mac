@@ -106,7 +106,7 @@ private struct SuggestionCard: View {
                     Spacer(minLength: 0)
                     if item.confidence > 0 {
                         // Shown for judgement, never used to auto-accept.
-                        Text("\(Int(item.confidence * 100))%")
+                        Text("\(Int(item.confidence * 100))% CONF")
                             .font(Theme.mono(9.5))
                             .monospacedDigit()
                             .foregroundStyle(theme.inkTertiary)

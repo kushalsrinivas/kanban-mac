@@ -163,6 +163,7 @@ struct MeetingDetailView: View {
                     .lineSpacing(2.5)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
+                    .frame(maxWidth: 640, alignment: .leading)
             }
 
             if !meeting.keyPoints.isEmpty {
@@ -210,6 +211,7 @@ struct MeetingDetailView: View {
                 }
             }
         }
+        .frame(maxWidth: 640, alignment: .leading)
     }
 
     private var transcriptBody: some View {

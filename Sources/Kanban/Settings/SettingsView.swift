@@ -31,14 +31,14 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 12) {
                 appearanceBlock(bindable)
                 tasksBlock(bindable)
-                meetingsBlock(bindable)
                 backendBlock(bindable)
+                meetingsBlock(bindable)
                 notificationsBlock(bindable)
                 dataBlock()
             }
             .padding(16)
+            .padding(.bottom, 24)
         }
-        .scrollIndicators(.never)
         .frame(width: 580, height: 660)
         .background(theme.paper)
         .environment(\.theme, app.theme)
@@ -140,7 +140,7 @@ struct SettingsView: View {
             }
             row("ARCHIVED") {
                 HStack(spacing: 8) {
-                    Text("\(archivedCount) RECORDS")
+                    Text("\(archivedCount) RECORD\(archivedCount == 1 ? "" : "S")")
                         .font(Theme.mono(10.5))
                         .foregroundStyle(theme.inkSecondary)
                     Button("RESTORE…") { showingArchived = true }

@@ -21,7 +21,7 @@ struct KanbanApp: App {
                 .onOpenURL { url in app.handle(url: url) }
         }
         .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
+        .windowResizability(.contentMinSize)
         .defaultSize(width: 1160, height: 760)
         .commands { KanbanCommands(app: app) }
 
@@ -96,6 +96,9 @@ struct KanbanCommands: Commands {
             Button("Archive Task") { app.archiveSelection() }
                 .keyboardShortcut(.delete, modifiers: .command)
                 .disabled(app.selection == nil)
+            Button(app.undoLabel) { app.undoLast() }
+                .keyboardShortcut("z", modifiers: [.command, .option])
+                .disabled(!app.canUndo)
             Divider()
             Button("Move Up") { app.shiftSelection(up: true) }
                 .keyboardShortcut(.upArrow, modifiers: .option)

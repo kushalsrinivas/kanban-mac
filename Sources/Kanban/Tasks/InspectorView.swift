@@ -66,12 +66,16 @@ struct TaskInspector: View {
                     Rule()
                     sourceBlock
                     metadata
-                    actions
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
             }
             .scrollIndicators(.never)
+
+            Rule()
+            actions
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
         }
         .onAppear(perform: load)
         .onChange(of: task.id) { _, _ in load() }

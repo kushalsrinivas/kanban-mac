@@ -275,7 +275,8 @@ private struct PaletteRow: View {
                 .font(Theme.mono(9, weight: .medium))
                 .tracking(0.8)
                 .foregroundStyle(theme.inkTertiary)
-                .frame(width: 42, alignment: .leading)
+                .lineLimit(1)
+                .frame(width: 56, alignment: .leading)
 
             Text(row.title)
                 .font(Theme.display(12.5))

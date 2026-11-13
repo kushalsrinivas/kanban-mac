@@ -8,16 +8,38 @@ struct BoardView: View {
     @Environment(\.isFocused) private var isFocused
 
     var body: some View {
-        ScrollView(.horizontal) {
-            HStack(alignment: .top, spacing: 10) {
-                ForEach(app.visibleStatuses, id: \.self) { status in
-                    ColumnView(status: status, tasks: app.tasks(in: status))
+        GeometryReader { geo in
+            let count = max(1, app.visibleStatuses.count)
+            let gap: CGFloat = 10
+            let available = geo.size.width - Theme.Metric.gutter * 2 - gap * CGFloat(count - 1)
+            // Fill the window instead of leaving a dead strip on wide screens;
+            // stop at a readable card width and scroll below the minimum.
+            let width = min(340, max(Theme.Metric.columnWidth, available / CGFloat(count)))
+
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal) {
+                    HStack(alignment: .top, spacing: gap) {
+                        ForEach(app.visibleStatuses, id: \.self) { status in
+                            ColumnView(status: status, tasks: app.tasks(in: status), width: width)
+                                .id(status)
+                        }
+                    }
+                    .padding(.horizontal, Theme.Metric.gutter)
+                    .padding(.bottom, 10)
+                }
+                .scrollIndicators(.automatic)
+                .onAppear { revealSelection(proxy) }
+                .onChange(of: app.selection) { _, _ in revealSelection(proxy) }
+                .onChange(of: app.focusedStatus) { _, status in
+                    proxy.scrollTo(status, anchor: .center)
+                }
+                .onChange(of: app.inspector) { _, _ in
+                    // Opening the inspector shrinks the board; keep the selected
+                    // card visible rather than letting it disappear behind the panel.
+                    revealSelection(proxy)
                 }
             }
-            .padding(.horizontal, Theme.Metric.gutter)
-            .padding(.bottom, 10)
         }
-        .scrollIndicators(.never)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // `.focused` only binds focus; the view must also be focusable for the
         // arrow/space/delete handlers to have a target.
@@ -35,5 +57,10 @@ struct BoardView: View {
                     .accessibilityHidden(true)
             }
         }
+    }
+
+    private func revealSelection(_ proxy: ScrollViewProxy) {
+        guard let id = app.selection else { return }
+        proxy.scrollTo(id, anchor: .center)
     }
 }
