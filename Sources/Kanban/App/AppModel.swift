@@ -26,6 +26,10 @@ final class AppModel {
     let sync: SyncEngine
     let recorder: MeetingRecorder
     let processor: MeetingProcessor
+    /// The bundled model catalog and the engine that runs its GGUF models.
+    let catalog: ModelCatalog?
+    let transcription: TranscriptionEngine
+    let models: ModelDownloader
     let agent: AgentSession
     @ObservationIgnored private let notifications = NotificationCenterBridge()
 
@@ -78,7 +82,13 @@ final class AppModel {
         self.client = client
         self.sync = sync
         self.recorder = MeetingRecorder(store: store, settings: settings)
-        self.processor = MeetingProcessor(store: store, client: client, settings: settings)
+        let catalog = try? ModelCatalog.bundled()
+        let transcription = TranscriptionEngine()
+        self.catalog = catalog
+        self.transcription = transcription
+        self.models = ModelDownloader()
+        self.processor = MeetingProcessor(store: store, client: client, settings: settings,
+                                          engine: transcription, catalog: catalog)
         self.agent = AgentSession(store: store, client: client, settings: settings, sync: sync)
 
         store.onChange = { [weak self] _ in

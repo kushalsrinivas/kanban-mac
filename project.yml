@@ -36,6 +36,10 @@ settings:
       SWIFT_OPTIMIZATION_LEVEL: "-Onone"
       ONLY_ACTIVE_ARCH: YES
 
+packages:
+  TranscribeCpp:
+    path: Vendor/TranscribeCpp
+
 targets:
   Kanban:
     type: application
@@ -45,8 +49,12 @@ targets:
       - path: Sources/Kanban
       - path: Resources/Kanban/AppIcon.icns
         buildPhase: resources
+      - path: Resources/Kanban/catalog.json
+        buildPhase: resources
     dependencies:
       - target: KanbanWidget
+      - package: TranscribeCpp
+        product: TranscribeCpp
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.kanban.app
@@ -85,8 +93,14 @@ targets:
       - path: Sources/Kanban/Core/Authentication/KeychainStore.swift
       - path: Sources/Kanban/Core/AI/GeminiClient.swift
       - path: Sources/Kanban/Core/AI/LocalAgentPlan.swift
+      - path: Sources/Kanban/Core/Transcription
+      - path: Resources/Kanban/catalog.json
+        buildPhase: resources
       - path: Sources/Kanban/Meetings/Recording/SystemAudioCaptureEngine.swift
       - path: Tests/KanbanCoreTests
+    dependencies:
+      - package: TranscribeCpp
+        product: TranscribeCpp
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.kanban.tests

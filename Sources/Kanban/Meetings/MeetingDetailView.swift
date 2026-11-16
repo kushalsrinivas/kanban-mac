@@ -303,7 +303,7 @@ struct MeetingDetailView: View {
                         }
                     }
                 } else {
-                    Text("Add a Gemini API key in Settings → Local AI to transcribe and analyse it on this Mac.")
+                    Text("Add a Gemini API key and download a speech model in Settings → Local AI to process this recording on this Mac.")
                         .font(Theme.mono(9.5))
                         .foregroundStyle(theme.inkTertiary)
                 }
@@ -436,7 +436,8 @@ struct ProcessingPanel: View {
 
                 ForEach(stages) { stage in
                     step(stage.label, stage.status,
-                         trailing: stage.status == .uploading && progress.status == .uploading
+                         trailing: progress.uploadFraction > 0 && progress.uploadFraction < 1
+                            && stage.status == progress.status
                             ? "\(Int(progress.uploadFraction * 100))%" : nil)
                 }
 

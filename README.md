@@ -5,8 +5,9 @@ utility. Backend lives in [`kanban-backend`](../kanban-backend); the monorepo
 overview is [`../README.md`](../README.md).
 
 The Mac does the interface, the keyboard, and capture — and now the thinking too.
-Transcription runs on-device with Apple's speech model; analysis and the agent call
-Gemini directly with a key stored in the Keychain. A VPS is optional and only adds
+Transcription runs on-device through `transcribe.cpp`, the same ggml inference
+engine and whisper GGUF models Handy uses; analysis and the agent call Gemini
+directly with a key stored in the Keychain. A VPS is optional and only adds
 multi-device sync.
 
 ## Running it
@@ -23,9 +24,9 @@ Signing is ad-hoc (`CODE_SIGN_IDENTITY = "-"`), so it builds and runs with no
 provisioning profile. Swap in your team in `project.yml` to notarise.
 
 Without any setup the app is a complete local task manager: the board, search, the
-palette and recording all work. Add a Gemini API key in Settings → Local AI to
-transcribe and analyse meetings on this Mac and to use the agent. Set Settings → VPS
-only if you want the optional server sync.
+palette and recording all work. In Settings → Local AI, download a whisper model and
+add a Gemini API key to transcribe and analyse meetings on this Mac and to use the
+agent. Set Settings → VPS only if you want the optional server sync.
 
 ## Layout
 
@@ -39,7 +40,8 @@ Sources/
 │   └── Snapshot         the small file the widget reads
 ├── Kanban/              the app
 │   ├── Core/            API client, SSE, Keychain, sync engine, notifications
-│   ├── Core/AI/         on-device transcription, Gemini client, action validation
+│   ├── Core/AI/         Gemini client, action validation
+│   ├── Core/Transcription  whisper engine, chunker, model catalog and downloads
 │   ├── Tasks/           board, cards, inspector, quick add
 │   ├── Meetings/        recorder, capture engine, processing, results, suggestions
 │   ├── Agent/           the console
@@ -97,12 +99,21 @@ down even if it disagrees about whether it is running, and FORCE STOP is there a
 unconditional escape hatch.
 
 Stopping saves the recording to `~/Library/Application Support/Kanban/Recordings` and
-starts transcribing it, without a second press. Transcription is `SpeechAnalyzer` on
-macOS 26 (long-form files, model installed by the system) with `SFSpeechRecognizer` on
-older systems; either way the audio is never uploaded. The resulting transcript goes to
-Gemini for structure. If neither a Gemini key nor a VPS is configured the recording
-waits on disk. The audio is kept after processing; turn off "keep recordings" to treat
-it as a transport file and reclaim the space instead.
+starts transcribing it, without a second press. The recording is decoded to 16 kHz
+mono and run through the loaded GGUF model by `transcribe.cpp`; the audio is never
+uploaded. The resulting transcript goes to Gemini for structure. If no model or Gemini
+key is configured the recording waits on disk. The audio is kept after processing; turn
+off "keep recordings" to treat it as a transport file and reclaim the space instead.
+
+The engine layer is a Swift port of Handy's: the bundled model catalog is the same
+file (pinned revisions and per-quant SHA-256), downloads verify before they are
+trusted, whisper's long-form decoding is one run, models that lose accuracy past
+their window are cut at Silero-VAD pauses, language hints are validated against the
+loaded model, and an idle engine unloads after five minutes. It lives in
+`Sources/Kanban/Core/Transcription`.
+
+The catalog (`Resources/Kanban/catalog.json`) and the Swift bindings under
+`Vendor/TranscribeCpp` are Handy's and transcribe.cpp's, both MIT licensed.
 
 Turn off **AUTO UPLOAD** in Settings and nothing leaves this Mac until you press PROCESS
 on a specific recording — per meeting, "Keep Local Only" does the same thing.

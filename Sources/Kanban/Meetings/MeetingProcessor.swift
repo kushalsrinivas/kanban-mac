@@ -33,10 +33,18 @@ final class MeetingProcessor {
     /// Called when a meeting finishes processing, so the UI can jump to the results.
     var onCompleted: ((Meeting) -> Void)?
 
-    init(store: LocalStore, client: APIClient, settings: AppSettings) {
+    /// The on-device engine and its catalog; nil only if the bundled catalog
+    /// failed to decode, which surfaces as a model-missing error.
+    private let engine: TranscriptionEngine
+    private let catalog: ModelCatalog?
+
+    init(store: LocalStore, client: APIClient, settings: AppSettings,
+         engine: TranscriptionEngine, catalog: ModelCatalog?) {
         self.store = store
         self.client = client
         self.settings = settings
+        self.engine = engine
+        self.catalog = catalog
     }
 
     func progress(for id: UUID) -> Progress? { active[id] }
@@ -70,6 +78,9 @@ final class MeetingProcessor {
     func cancel(_ meetingID: UUID) {
         generations[meetingID, default: 0] &+= 1
         tasks[meetingID]?.cancel()
+        // A decode owns the engine while it runs, so stopping it has to reach
+        // the engine's cancellation token, not just the Swift task.
+        Task { engine.cancel() }
         tasks[meetingID] = nil
         active[meetingID] = nil
         store.updateMeeting(meetingID) {
@@ -119,6 +130,10 @@ final class MeetingProcessor {
             } catch is CancellationError {
                 clearActive(meetingID, generation: generation)
             } catch let error as LocalAIError {
+                if isCurrent(meetingID, generation) {
+                    fail(meetingID, error.localizedDescription, transient: error.isTransient)
+                }
+            } catch let error as TranscriptionError {
                 if isCurrent(meetingID, generation) {
                     fail(meetingID, error.localizedDescription, transient: error.isTransient)
                 }
@@ -190,16 +205,36 @@ final class MeetingProcessor {
     /// Transcription and analysis on this Mac. Never uploads the recording.
     private func runLocal(meeting: Meeting, fileURL: URL, meetingID: UUID,
                           generation: UInt64) async throws {
-        set(meetingID, .transcribing, detail: "Preparing on-device transcription…")
-        let transcriber = LocalTranscriber()
-        let transcript = try await transcriber.transcribe(url: fileURL) { [weak self] message in
-            self?.setDetail(meetingID, message, generation: generation)
+        guard let catalog, let entry = catalog.entry(settings.transcriptionModelID) else {
+            throw TranscriptionError.modelMissing("speech")
         }
+        guard let modelURL = ModelStorage.installedURL(for: entry) else {
+            throw TranscriptionError.modelMissing(entry.name)
+        }
+        let vadURL = catalog.vadEntry.flatMap(ModelStorage.installedURL(for:))
+
+        set(meetingID, .transcribing, detail: "Reading the recording…")
+        let pcm = try await Task.detached(priority: .userInitiated) {
+            try AudioPCM.decode(url: fileURL)
+        }.value
         try ensureCurrent(meetingID, generation)
 
-        store.saveTranscript(transcript.segments, for: meetingID)
+        let result = try await engine.transcribe(
+            pcm: pcm,
+            entry: entry,
+            modelURL: modelURL,
+            vadModelURL: vadURL,
+            vocabulary: settings.vocabularyList) { [weak self] fraction, detail in
+                Task { @MainActor in
+                    self?.setProgress(meetingID, fraction, detail, generation: generation)
+                }
+            }
+        try ensureCurrent(meetingID, generation)
+
+        setDetail(meetingID, "Saving transcript…", generation: generation)
+        store.saveTranscript(result.segments, for: meetingID)
         store.updateMeeting(meetingID) {
-            $0.duration = max($0.duration, transcript.segments.last?.end ?? 0)
+            $0.duration = max($0.duration, result.segments.last?.end ?? 0)
         }
 
         set(meetingID, .analyzing, detail: "Analysing with Gemini…")
@@ -208,9 +243,17 @@ final class MeetingProcessor {
             title: meeting.title,
             startedAt: meeting.startedAt,
             duration: store.meeting(meetingID)?.duration ?? meeting.duration,
-            transcript: transcript.text)
+            transcript: result.text)
         try ensureCurrent(meetingID, generation)
         apply(analysis, to: meetingID)
+    }
+
+    private func setProgress(_ meetingID: UUID, _ fraction: Double, _ detail: String,
+                             generation: UInt64) {
+        guard isCurrent(meetingID, generation), var progress = active[meetingID] else { return }
+        progress.uploadFraction = fraction
+        progress.detail = detail
+        active[meetingID] = progress
     }
 
     private func setDetail(_ meetingID: UUID, _ detail: String, generation: UInt64) {

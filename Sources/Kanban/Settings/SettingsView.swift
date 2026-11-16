@@ -332,26 +332,157 @@ struct SettingsView: View {
             row("MODEL") {
                 field(text: settings.geminiModel, placeholder: "gemini-2.5-flash")
             }
-            row("TRANSCRIPTION") {
-                if #available(macOS 26.0, *) {
-                    StatusDot(.on)
-                    Text("ON THIS MAC")
-                        .font(Theme.mono(10.5, weight: .medium))
-                        .tracking(0.6)
-                        .foregroundStyle(theme.ink)
-                } else {
-                    StatusDot(.alert)
-                    Text("NEEDS MACOS 26")
-                        .font(Theme.mono(10.5, weight: .medium))
-                        .tracking(0.6)
-                        .foregroundStyle(theme.signal)
+            row("SPEECH MODEL") {
+                speechModelMenu(settings)
+            }
+            row("QUALITY") {
+                speechQualityMenu(settings)
+            }
+            row("MODEL FILE") {
+                speechModelStatus(settings)
+            }
+            row("VOCABULARY") {
+                field(text: settings.transcriptionVocabulary,
+                      placeholder: "names, products, acronyms")
+            }
+            note("Meetings are transcribed on this Mac by whisper, through the same engine and GGUF models Handy uses. Audio never leaves this Mac; only the transcript goes to Gemini for analysis.")
+        }
+    }
+
+
+    // MARK: Speech model
+
+    private var selectedSpeechModel: ModelCatalog.Entry? {
+        app.catalog?.entry(app.settings.transcriptionModelID)
+    }
+
+    private var selectedSpeechFile: ModelCatalog.File? {
+        guard let entry = selectedSpeechModel else { return nil }
+        return entry.file(quant: app.settings.transcriptionQuant.isEmpty
+                          ? nil : app.settings.transcriptionQuant)
+    }
+
+    private func speechModelMenu(_ settings: Bindable<AppSettings>) -> some View {
+        Menu {
+            if let catalog = app.catalog {
+                ForEach(catalog.whisperModels) { model in
+                    Button {
+                        settings.transcriptionModelID.wrappedValue = model.id
+                        settings.transcriptionQuant.wrappedValue = ""
+                    } label: {
+                        if model.id == app.settings.transcriptionModelID {
+                            Label(model.name, systemImage: "checkmark")
+                        } else {
+                            Text(model.name)
+                        }
+                    }
                 }
             }
-            note("Transcription runs on this Mac with Apple's on-device speech model. Only the transcript is sent to Gemini for analysis; recordings never leave this Mac.")
-            if #unavailable(macOS 26.0) {
-                note("On-device transcription needs macOS 26. Tasks and recording still work here.")
+        } label: {
+            menuLabel(selectedSpeechModel?.name.uppercased() ?? "NO CATALOG")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    private func speechQualityMenu(_ settings: Bindable<AppSettings>) -> some View {
+        Menu {
+            if let entry = selectedSpeechModel {
+                ForEach(entry.quantKeys, id: \.self) { key in
+                    Button {
+                        settings.transcriptionQuant.wrappedValue = key
+                    } label: {
+                        let size = ByteCountFormatter.string(
+                            fromByteCount: entry.files[key]?.size ?? 0, countStyle: .file)
+                        Text("\(key) · \(size)")
+                    }
+                }
+            }
+        } label: {
+            let entry = selectedSpeechModel
+            let file = selectedSpeechFile
+            let size = ByteCountFormatter.string(fromByteCount: file?.size ?? 0, countStyle: .file)
+            menuLabel((app.settings.transcriptionQuant.isEmpty ? entry?.quant : app.settings.transcriptionQuant)
+                .map { "\($0) · \(size)" } ?? "—")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    private func speechModelStatus(_ settings: Bindable<AppSettings>) -> some View {
+        let entry = selectedSpeechModel
+        let file = selectedSpeechFile
+        let key = entry.flatMap { entry in file.map { ModelDownloader.key(entry, $0) } }
+        let progress = key.flatMap { app.models.active[$0] }
+        let installed: Bool = {
+            guard let entry, let file else { return false }
+            return ModelStorage.isInstalled(entry, file: file)
+        }()
+        return HStack(spacing: 8) {
+            if let progress {
+                Text("\(Int(progress.fraction * 100))%")
+                    .font(Theme.mono(10.5)).monospacedDigit()
+                    .foregroundStyle(theme.inkSecondary)
+                ProgressView(value: progress.fraction)
+                    .progressViewStyle(.linear)
+                    .frame(width: 90)
+            } else if installed, let entry, let file {
+                StatusDot(.on)
+                Text(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file).uppercased())
+                    .font(Theme.mono(10.5)).monospacedDigit()
+                    .foregroundStyle(theme.inkSecondary)
+                Button("DELETE") {
+                    ModelStorage.delete(entry)
+                    Task { await app.transcription.unload() }
+                }
+                .buttonStyle(PanelButtonStyle(compact: true))
+            } else if let entry, let file {
+                StatusDot(.alert)
+                Text(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file).uppercased())
+                    .font(Theme.mono(10.5)).monospacedDigit()
+                    .foregroundStyle(theme.inkSecondary)
+                Button("DOWNLOAD") {
+                    Task {
+                        do {
+                            _ = try await app.models.download(entry, file: file)
+                            app.flash("SPEECH MODEL READY")
+                        } catch {
+                            app.flash("MODEL DOWNLOAD FAILED")
+                        }
+                    }
+                }
+                .buttonStyle(PanelButtonStyle(prominent: true, compact: true))
+            } else {
+                Text("NO CATALOG")
+                    .font(Theme.mono(10.5))
+                    .foregroundStyle(theme.signal)
+            }
+            if let error = app.models.lastError, progress == nil, !installed {
+                Text(error.uppercased())
+                    .font(Theme.mono(9))
+                    .foregroundStyle(theme.signal)
+                    .lineLimit(2)
             }
         }
+    }
+
+    private func menuLabel(_ text: String) -> some View {
+        HStack(spacing: 6) {
+            Text(text)
+                .font(Theme.mono(10.5, weight: .medium))
+                .tracking(0.6)
+                .foregroundStyle(theme.ink)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(theme.inkTertiary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(theme.panelAlt, in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+            .strokeBorder(theme.lineStrong, lineWidth: Theme.Metric.hairline))
     }
 
     /// Commits the Gemini key only on submit, focus loss or close.

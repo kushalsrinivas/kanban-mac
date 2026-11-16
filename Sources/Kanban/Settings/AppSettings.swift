@@ -53,6 +53,20 @@ final class AppSettings {
     /// Gemini is called directly from the app for analysis and the agent.
     var geminiModel: String { didSet { set(geminiModel, "geminiModel") } }
 
+    // Local transcription: whisper GGUF through transcribe.cpp, on this Mac.
+    var transcriptionModelID: String { didSet { set(transcriptionModelID, "transcriptionModelID") } }
+    /// Empty means the catalog's default quant for the selected model.
+    var transcriptionQuant: String { didSet { set(transcriptionQuant, "transcriptionQuant") } }
+    /// Comma or newline separated terms passed to the model as vocabulary.
+    var transcriptionVocabulary: String { didSet { set(transcriptionVocabulary, "transcriptionVocabulary") } }
+
+    var vocabularyList: [String] {
+        transcriptionVocabulary
+            .split(whereSeparator: { $0 == "," || $0 == "\n" })
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
     /// Stored in the login Keychain, not in UserDefaults, and read on first use
     /// rather than in `init`.
     ///
@@ -147,6 +161,9 @@ final class AppSettings {
         requestTimeout = double("requestTimeout", 20)
         confirmDestructiveAgentActions = bool("confirmDestructive", true)
         geminiModel = string("geminiModel", "gemini-2.5-flash")
+        transcriptionModelID = string("transcriptionModelID", "whisper-small")
+        transcriptionQuant = string("transcriptionQuant", "")
+        transcriptionVocabulary = string("transcriptionVocabulary", "")
         captureMicrophone = bool("captureMicrophone", true)
         // System audio used to default on. Reset it once for anyone carrying the old
         // value, so nobody is stuck with a Screen Recording prompt they never wanted.
