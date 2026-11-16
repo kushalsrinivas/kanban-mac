@@ -40,6 +40,31 @@ enum ModelStorage {
         return path(for: entry, file: file)
     }
 
+    /// The model to transcribe with: the preferred one when installed, else the
+    /// first whisper model that is. Returns nil when none is on disk.
+    static func resolve(in catalog: ModelCatalog,
+                        preferred: String) -> (entry: ModelCatalog.Entry, url: URL)? {
+        if let entry = catalog.entry(preferred), let url = installedURL(for: entry) {
+            return (entry, url)
+        }
+        for entry in catalog.whisperModels {
+            if let url = installedURL(for: entry) { return (entry, url) }
+        }
+        return nil
+    }
+
+    /// Whether any model at all is installed — used to decide whether a
+    /// recording can be transcribed without a server.
+    static var hasAnyInstalledModel: Bool {
+        guard let ids = try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil) else { return false }
+        return ids.contains { id in
+            guard let files = try? FileManager.default.contentsOfDirectory(
+                at: id, includingPropertiesForKeys: nil) else { return false }
+            return files.contains { $0.pathExtension == "gguf" }
+        }
+    }
+
     static func delete(_ entry: ModelCatalog.Entry) {
         try? FileManager.default.removeItem(at: directory(for: entry.id))
     }

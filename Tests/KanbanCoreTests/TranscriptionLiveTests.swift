@@ -52,6 +52,22 @@ final class TranscriptionLiveTests: XCTestCase {
         XCTAssertGreaterThan(result.audioSeconds, 3)
     }
 
+    func testTranscribesAProvidedRecording() async throws {
+        let modelURL = try required("KANBAN_TEST_MODEL")
+        let recording = try required("KANBAN_TEST_RECORDING")
+        let entry = try XCTUnwrap(catalog().entry("whisper-tiny"))
+
+        let pcm = try AudioPCM.decode(url: recording)
+        let engine = TranscriptionEngine()
+        let result = try await engine.transcribe(
+            pcm: pcm, entry: entry, modelURL: modelURL, vadModelURL: nil)
+        await engine.unload()
+
+        print("RECORDING TRANSCRIPT [\(result.language ?? "-")] \(result.audioSeconds)s: \(result.text)")
+        XCTAssertFalse(result.text.isEmpty)
+        XCTAssertFalse(result.segments.isEmpty)
+    }
+
     @MainActor
     func testDownloadsAndVerifiesAModel() async throws {
         guard environment["KANBAN_TEST_DOWNLOAD"] == "1" else {

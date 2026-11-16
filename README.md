@@ -101,9 +101,11 @@ unconditional escape hatch.
 Stopping saves the recording to `~/Library/Application Support/Kanban/Recordings` and
 starts transcribing it, without a second press. The recording is decoded to 16 kHz
 mono and run through the loaded GGUF model by `transcribe.cpp`; the audio is never
-uploaded. The resulting transcript goes to Gemini for structure. If no model or Gemini
-key is configured the recording waits on disk. The audio is kept after processing; turn
-off "keep recordings" to treat it as a transport file and reclaim the space instead.
+uploaded. The resulting transcript goes to Gemini for structure when a key is
+configured; without one the meeting finishes with its transcript and no analysis. If no
+speech model is installed the recording waits on disk. The audio is kept after
+processing; turn off "keep recordings" to treat it as a transport file and reclaim the
+space instead.
 
 The engine layer is a Swift port of Handy's: the bundled model catalog is the same
 file (pinned revisions and per-quant SHA-256), downloads verify before they are

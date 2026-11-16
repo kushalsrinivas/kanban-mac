@@ -87,6 +87,25 @@ final class AppModel {
         self.catalog = catalog
         self.transcription = transcription
         self.models = ModelDownloader()
+
+        // First launch after a model was placed on disk: use what is there
+        // rather than the shipped default, which may not be downloaded.
+        if settings.transcriptionModelWasDefaulted, let catalog,
+           let installed = ModelStorage.resolve(in: catalog,
+                                                preferred: settings.transcriptionModelID) {
+            settings.transcriptionModelID = installed.entry.id
+        }
+
+        // A meeting left mid-flight by a quit has no task behind it any more;
+        // release it so it can be processed again instead of spinning forever.
+        for meeting in store.meetings where meeting.status.isProcessing {
+            store.updateMeeting(meeting.id) {
+                $0.status = $0.audioFilename == nil ? .failed : .readyToProcess
+                if $0.audioFilename == nil {
+                    $0.failureReason = "Processing was interrupted."
+                }
+            }
+        }
         self.processor = MeetingProcessor(store: store, client: client, settings: settings,
                                           engine: transcription, catalog: catalog)
         self.agent = AgentSession(store: store, client: client, settings: settings, sync: sync)
@@ -98,7 +117,9 @@ final class AppModel {
         }
         processor.onCompleted = { [weak self] meeting in
             guard let self else { return }
-            self.flash("MEETING PROCESSED · \(meeting.suggestedCount) SUGGESTED")
+            self.flash(meeting.summary.isEmpty
+                       ? "TRANSCRIBED"
+                       : "MEETING PROCESSED · \(meeting.suggestedCount) SUGGESTED")
             if self.settings.notifyOnMeetingProcessed {
                 self.notifications.notifyMeetingProcessed(title: meeting.title,
                                                           suggestions: meeting.suggestedCount)
@@ -465,9 +486,9 @@ final class AppModel {
                 return
             }
             processor.process(finished.meetingID)
-            flash(settings.hasGeminiKey ? "SAVED · TRANSCRIBING ON THIS MAC"
-                                        : (sync.connection.isOnline ? "SAVED · UPLOADING"
-                                                                    : "SAVED · UPLOADS WHEN ONLINE"))
+            flash(settings.hasLocalTranscriptionModel
+                  ? "SAVED · TRANSCRIBING ON THIS MAC"
+                  : (sync.connection.isOnline ? "SAVED · UPLOADING" : "SAVED · UPLOADS WHEN ONLINE"))
         }
     }
 
@@ -475,7 +496,7 @@ final class AppModel {
     func processRecording(_ meetingID: UUID) {
         selectedMeeting = meetingID
         guard settings.canProcessMeetings else {
-            flash("ADD A GEMINI KEY OR VPS URL · SAVED LOCALLY")
+            flash("DOWNLOAD A SPEECH MODEL IN SETTINGS · LOCAL AI")
             store.updateMeeting(meetingID) { $0.status = .readyToProcess }
             return
         }

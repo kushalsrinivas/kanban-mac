@@ -124,8 +124,21 @@ final class AppSettings {
         !geminiAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// Local processing needs the Gemini key; the VPS path remains a fallback.
-    var canProcessMeetings: Bool { hasGeminiKey || backendIsConfigured }
+    /// A recording can be processed when there is a speech model on this Mac,
+    /// a Gemini key (analysis), or a VPS. Transcription itself never needs the
+    /// network.
+    var canProcessMeetings: Bool {
+        hasLocalTranscriptionModel || hasGeminiKey || backendIsConfigured
+    }
+
+    /// A speech model is on this Mac, so transcription can run offline.
+    var hasLocalTranscriptionModel: Bool { ModelStorage.hasAnyInstalledModel }
+
+    /// The selected model was never explicitly chosen (the shipped default is
+    /// still in effect).
+    var transcriptionModelWasDefaulted: Bool {
+        defaults.object(forKey: "transcriptionModelID") == nil
+    }
     var captureMicrophone: Bool { didSet { set(captureMicrophone, "captureMicrophone") } }
     /// Off by default. Capturing the other side of a call needs ScreenCaptureKit,
     /// which means Screen Recording permission and a capture indicator in the menu

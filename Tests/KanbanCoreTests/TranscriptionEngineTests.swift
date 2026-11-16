@@ -115,7 +115,38 @@ final class TranscriptionEngineTests: XCTestCase {
                        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
     }
 
-    func testModelStoragePathUsesTheModelIDAndFilename() throws {
+    func testResolveUsesTheSelectedModelOrAnyInstalledOne() throws {
+        let support = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kanban-resolve-\(UUID().uuidString)", isDirectory: true)
+        setenv("KANBAN_SUPPORT_DIR", support.path, 1)
+        defer {
+            unsetenv("KANBAN_SUPPORT_DIR")
+            try? FileManager.default.removeItem(at: support)
+        }
+
+        let catalog = try ModelCatalog.decode(catalogData())
+        let tiny = try XCTUnwrap(catalog.entry("whisper-tiny"))
+        let file = try XCTUnwrap(tiny.defaultFile)
+        XCTAssertNil(ModelStorage.resolve(in: catalog, preferred: "whisper-small"))
+        XCTAssertFalse(ModelStorage.hasAnyInstalledModel)
+
+        // A file at the catalogued size is what "installed" means.
+        try FileManager.default.createDirectory(
+            at: ModelStorage.directory(for: tiny.id), withIntermediateDirectories: true)
+        let url = ModelStorage.path(for: tiny, file: file)
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: UInt64(file.size))
+        try handle.close()
+
+        XCTAssertTrue(ModelStorage.hasAnyInstalledModel)
+        XCTAssertEqual(ModelStorage.resolve(in: catalog, preferred: "whisper-small")?.entry.id,
+                       "whisper-tiny", "a missing selection falls back to what is on disk")
+        XCTAssertEqual(ModelStorage.resolve(in: catalog, preferred: "whisper-tiny")?.entry.id,
+                       "whisper-tiny")
+    }
+
+    func testSpeechModelPathUsesTheModelIDAndFilename() throws {
         let catalog = try ModelCatalog.decode(catalogData())
         let entry = try XCTUnwrap(catalog.entry("whisper-tiny"))
         let file = try XCTUnwrap(entry.defaultFile)

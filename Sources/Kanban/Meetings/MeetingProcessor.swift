@@ -117,9 +117,15 @@ final class MeetingProcessor {
         }
 
         // Local first: it needs no server and keeps the audio on this Mac.
-        if settings.hasGeminiKey {
+        // A speech model is all transcription needs; the Gemini key only adds
+        // the analysis step.
+        let local = catalog.flatMap {
+            ModelStorage.resolve(in: $0, preferred: settings.transcriptionModelID)
+        }
+        if let local {
             do {
                 try await runLocal(meeting: meeting, fileURL: fileURL,
+                                   entry: local.entry, modelURL: local.url,
                                    meetingID: meetingID, generation: generation)
                 try ensureCurrent(meetingID, generation)
                 cleanupAudio(meetingID: meetingID, filename: filename)
@@ -143,9 +149,18 @@ final class MeetingProcessor {
             return
         }
 
+        // No model on disk. With a Gemini key the user asked for local work, so
+        // say what is missing instead of silently uploading to a server.
+        if settings.hasGeminiKey {
+            fail(meetingID, TranscriptionError
+                .modelMissing(catalog?.entry(settings.transcriptionModelID)?.name ?? "speech")
+                .localizedDescription)
+            return
+        }
+
         guard await client.isConfigured else {
             if isCurrent(meetingID, generation) {
-                fail(meetingID, "Add a Gemini API key in Settings → Local AI to process meetings on this Mac.")
+                fail(meetingID, "Download a speech model in Settings → Local AI to transcribe on this Mac.")
             }
             return
         }
@@ -202,16 +217,13 @@ final class MeetingProcessor {
         }
     }
 
-    /// Transcription and analysis on this Mac. Never uploads the recording.
-    private func runLocal(meeting: Meeting, fileURL: URL, meetingID: UUID,
-                          generation: UInt64) async throws {
-        guard let catalog, let entry = catalog.entry(settings.transcriptionModelID) else {
-            throw TranscriptionError.modelMissing("speech")
-        }
-        guard let modelURL = ModelStorage.installedURL(for: entry) else {
-            throw TranscriptionError.modelMissing(entry.name)
-        }
-        let vadURL = catalog.vadEntry.flatMap(ModelStorage.installedURL(for:))
+    /// Transcription on this Mac. Never uploads the recording. Analysis follows
+    /// only when a Gemini key is configured; without one the meeting finishes
+    /// with its transcript and no summary.
+    private func runLocal(meeting: Meeting, fileURL: URL,
+                          entry: ModelCatalog.Entry, modelURL: URL,
+                          meetingID: UUID, generation: UInt64) async throws {
+        let vadURL = catalog?.vadEntry.flatMap(ModelStorage.installedURL(for:))
 
         set(meetingID, .transcribing, detail: "Reading the recording…")
         let pcm = try await Task.detached(priority: .userInitiated) {
@@ -235,6 +247,16 @@ final class MeetingProcessor {
         store.saveTranscript(result.segments, for: meetingID)
         store.updateMeeting(meetingID) {
             $0.duration = max($0.duration, result.segments.last?.end ?? 0)
+        }
+
+        guard settings.hasGeminiKey else {
+            // Transcript only: still a finished meeting, just without analysis.
+            store.updateMeeting(meetingID) {
+                $0.status = .completed
+                $0.processedAt = Date()
+                $0.failureReason = nil
+            }
+            return
         }
 
         set(meetingID, .analyzing, detail: "Analysing with Gemini…")
