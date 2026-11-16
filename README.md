@@ -4,8 +4,10 @@ A Kanban board, a meeting recorder and an agent console, built as one native mac
 utility. Backend lives in [`kanban-backend`](../kanban-backend); the monorepo
 overview is [`../README.md`](../README.md).
 
-The Mac does what only the Mac can do: draw the interface, take keyboard input, and
-capture audio. Transcription, analysis and agent reasoning all happen on the VPS.
+The Mac does the interface, the keyboard, and capture — and now the thinking too.
+Transcription runs on-device with Apple's speech model; analysis and the agent call
+Gemini directly with a key stored in the Keychain. A VPS is optional and only adds
+multi-device sync.
 
 ## Running it
 
@@ -20,9 +22,10 @@ Then ⌘R. `Kanban.xcodeproj` is generated from `project.yml` and is not committ
 Signing is ad-hoc (`CODE_SIGN_IDENTITY = "-"`), so it builds and runs with no
 provisioning profile. Swap in your team in `project.yml` to notarise.
 
-Without a backend configured the app is a complete local task manager: the board,
-search, the palette and recording all work. Set Settings → VPS to add meetings
-processing and the agent.
+Without any setup the app is a complete local task manager: the board, search, the
+palette and recording all work. Add a Gemini API key in Settings → Local AI to
+transcribe and analyse meetings on this Mac and to use the agent. Set Settings → VPS
+only if you want the optional server sync.
 
 ## Layout
 
@@ -36,6 +39,7 @@ Sources/
 │   └── Snapshot         the small file the widget reads
 ├── Kanban/              the app
 │   ├── Core/            API client, SSE, Keychain, sync engine, notifications
+│   ├── Core/AI/         on-device transcription, Gemini client, action validation
 │   ├── Tasks/           board, cards, inspector, quick add
 │   ├── Meetings/        recorder, capture engine, processing, results, suggestions
 │   ├── Agent/           the console
@@ -45,7 +49,8 @@ Sources/
 
 ## How state works
 
-The VPS is the source of truth. The Mac keeps a SQLite **cache with an outbox**:
+The SQLite database on this Mac is the source of truth. When a VPS is configured it
+also becomes a **cache with an outbox**:
 
 - Every mutation applies locally first, so the UI never waits on a network call.
 - The same mutation is queued as a replayable HTTP request.
@@ -92,10 +97,12 @@ down even if it disagrees about whether it is running, and FORCE STOP is there a
 unconditional escape hatch.
 
 Stopping saves the recording to `~/Library/Application Support/Kanban/Recordings` and
-sends it to the VPS for transcription, without a second press. If the VPS is unreachable
-the recording waits on disk and goes up when the connection returns. The audio is kept
-after processing; turn off "keep recordings" to treat it as a transport file and reclaim
-the space instead.
+starts transcribing it, without a second press. Transcription is `SpeechAnalyzer` on
+macOS 26 (long-form files, model installed by the system) with `SFSpeechRecognizer` on
+older systems; either way the audio is never uploaded. The resulting transcript goes to
+Gemini for structure. If neither a Gemini key nor a VPS is configured the recording
+waits on disk. The audio is kept after processing; turn off "keep recordings" to treat
+it as a transport file and reclaim the space instead.
 
 Turn off **AUTO UPLOAD** in Settings and nothing leaves this Mac until you press PROCESS
 on a specific recording — per meeting, "Keep Local Only" does the same thing.
@@ -111,7 +118,7 @@ without touching the meeting flow.
 
 ## Meeting action items never become tasks on their own
 
-The VPS extracts action items. They arrive as *suggestions*. You press ADD, adjust the
+The analysis extracts action items. They arrive as *suggestions*. You press ADD, adjust the
 title, status, priority and due date, and confirm. ADD ALL skips the per-item dialog,
 not the decision. A task created this way keeps a link back to the meeting it came from,
 and deleting it puts the suggestion back.
@@ -119,8 +126,9 @@ and deleting it puts the suggestion back.
 ## The agent
 
 Reads answer inline. Writes come back as structured operations with a one-line summary,
-and sit there until you press EXECUTE. The Mac never interprets them — the server
-validated and described each one. Destructive operations are marked.
+and sit there until you press EXECUTE. The Mac validates every proposed operation
+against the local store — an invented task id or an unparseable date is dropped rather
+than guessed at — and then applies it. Destructive operations are marked.
 
 ## Keyboard
 

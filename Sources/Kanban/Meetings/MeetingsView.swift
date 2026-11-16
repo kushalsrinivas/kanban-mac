@@ -225,7 +225,7 @@ struct RecordingPanel: View {
                 Button("OPEN") { app.openMeeting(finished.meetingID) }
                     .buttonStyle(PanelButtonStyle(compact: true))
                 if app.store.meeting(finished.meetingID)?.awaitsUpload == true,
-                   app.settings.backendIsConfigured {
+                   app.settings.canProcessMeetings {
                     Button("PROCESS") { app.processRecording(finished.meetingID) }
                         .buttonStyle(PanelButtonStyle(compact: true))
                 }

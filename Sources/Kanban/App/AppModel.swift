@@ -129,6 +129,9 @@ final class AppModel {
         ScreenshotDriver.runIfRequested(self)
         #endif
         Task {
+            // With a Gemini key the pipeline is local; retry anything left ready
+            // when the app last closed without waiting for a server.
+            if settings.hasGeminiKey, settings.autoUpload { processor.processPending() }
             await connect()
             await recorder.probe()
         }
@@ -447,20 +450,22 @@ final class AppModel {
                 flash("SAVED · NO AUDIO DETECTED")
                 return
             }
-            guard settings.autoUpload, settings.backendIsConfigured else {
+            guard settings.autoUpload, settings.canProcessMeetings else {
                 flash("RECORDING SAVED LOCALLY")
                 return
             }
             processor.process(finished.meetingID)
-            flash(sync.connection.isOnline ? "SAVED · UPLOADING" : "SAVED · UPLOADS WHEN ONLINE")
+            flash(settings.hasGeminiKey ? "SAVED · TRANSCRIBING ON THIS MAC"
+                                        : (sync.connection.isOnline ? "SAVED · UPLOADING"
+                                                                    : "SAVED · UPLOADS WHEN ONLINE"))
         }
     }
 
     /// The user chose PROCESS on a finished recording.
     func processRecording(_ meetingID: UUID) {
         selectedMeeting = meetingID
-        guard settings.backendIsConfigured else {
-            flash("NO VPS CONFIGURED · SAVED LOCALLY")
+        guard settings.canProcessMeetings else {
+            flash("ADD A GEMINI KEY OR VPS URL · SAVED LOCALLY")
             store.updateMeeting(meetingID) { $0.status = .readyToProcess }
             return
         }

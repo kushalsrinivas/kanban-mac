@@ -95,12 +95,6 @@ final class MeetingProcessor {
 
     private func run(_ meetingID: UUID, generation: UInt64) async {
         guard isCurrent(meetingID, generation), let meeting = store.meeting(meetingID) else { return }
-        guard await client.isConfigured else {
-            if isCurrent(meetingID, generation) {
-                fail(meetingID, "No VPS configured. Set the server URL in Settings.")
-            }
-            return
-        }
         guard let filename = meeting.audioFilename else {
             fail(meetingID, "The recording file is missing.")
             return
@@ -108,6 +102,36 @@ final class MeetingProcessor {
         let fileURL = KanbanPaths.recordingURL(filename: filename)
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             fail(meetingID, "The recording file is missing from disk.")
+            return
+        }
+
+        // Local first: it needs no server and keeps the audio on this Mac.
+        if settings.hasGeminiKey {
+            do {
+                try await runLocal(meeting: meeting, fileURL: fileURL,
+                                   meetingID: meetingID, generation: generation)
+                try ensureCurrent(meetingID, generation)
+                cleanupAudio(meetingID: meetingID, filename: filename)
+                clearActive(meetingID, generation: generation)
+                if isCurrent(meetingID, generation), let finished = store.meeting(meetingID) {
+                    onCompleted?(finished)
+                }
+            } catch is CancellationError {
+                clearActive(meetingID, generation: generation)
+            } catch let error as LocalAIError {
+                if isCurrent(meetingID, generation) {
+                    fail(meetingID, error.localizedDescription, transient: error.isTransient)
+                }
+            } catch {
+                if isCurrent(meetingID, generation) { fail(meetingID, "\(error)") }
+            }
+            return
+        }
+
+        guard await client.isConfigured else {
+            if isCurrent(meetingID, generation) {
+                fail(meetingID, "Add a Gemini API key in Settings → Local AI to process meetings on this Mac.")
+            }
             return
         }
 
@@ -160,6 +184,73 @@ final class MeetingProcessor {
             }
         } catch {
             if isCurrent(meetingID, generation) { fail(meetingID, "\(error)") }
+        }
+    }
+
+    /// Transcription and analysis on this Mac. Never uploads the recording.
+    private func runLocal(meeting: Meeting, fileURL: URL, meetingID: UUID,
+                          generation: UInt64) async throws {
+        set(meetingID, .transcribing, detail: "Preparing on-device transcription…")
+        let transcriber = LocalTranscriber()
+        let transcript = try await transcriber.transcribe(url: fileURL) { [weak self] message in
+            self?.setDetail(meetingID, message, generation: generation)
+        }
+        try ensureCurrent(meetingID, generation)
+
+        store.saveTranscript(transcript.segments, for: meetingID)
+        store.updateMeeting(meetingID) {
+            $0.duration = max($0.duration, transcript.segments.last?.end ?? 0)
+        }
+
+        set(meetingID, .analyzing, detail: "Analysing with Gemini…")
+        let client = GeminiClient(apiKey: settings.geminiAPIKey, model: settings.geminiModel)
+        let analysis = try await client.analyseMeeting(
+            title: meeting.title,
+            startedAt: meeting.startedAt,
+            duration: store.meeting(meetingID)?.duration ?? meeting.duration,
+            transcript: transcript.text)
+        try ensureCurrent(meetingID, generation)
+        apply(analysis, to: meetingID)
+    }
+
+    private func setDetail(_ meetingID: UUID, _ detail: String, generation: UInt64) {
+        guard isCurrent(meetingID, generation), var progress = active[meetingID] else { return }
+        progress.detail = detail
+        active[meetingID] = progress
+    }
+
+    private func apply(_ analysis: MeetingAnalysis, to meetingID: UUID) {
+        guard let meeting = store.meeting(meetingID) else { return }
+        // Preserve decisions the user already made; the new analysis only adds
+        // suggestions. Matching by title is the same rule the server uses.
+        let decided = meeting.actionItems.filter { $0.state != .suggested }
+        let decidedTitles = Set(decided.map { $0.title.trimmingCharacters(in: .whitespaces).lowercased() })
+        var items = decided
+        for suggestion in analysis.actionItems {
+            let title = suggestion.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty,
+                  !decidedTitles.contains(title.lowercased()) else { continue }
+            items.append(ActionItem(
+                meetingID: meetingID,
+                title: String(title.prefix(500)),
+                assignee: suggestion.assignee,
+                dueDate: suggestion.dueDate.flatMap { DateInput.parse($0) },
+                confidence: min(1, max(0, suggestion.confidence ?? 0)),
+                state: .suggested,
+                position: Double(items.count)))
+        }
+
+        store.updateMeeting(meetingID) {
+            $0.summary = analysis.summary
+            $0.keyPoints = analysis.keyPoints
+            $0.decisions = analysis.decisions
+            $0.questions = analysis.questions
+            $0.topics = analysis.topics
+            $0.participants = analysis.participants
+            $0.actionItems = items
+            $0.status = .completed
+            $0.processedAt = Date()
+            $0.failureReason = nil
         }
     }
 

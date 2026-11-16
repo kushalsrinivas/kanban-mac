@@ -49,6 +49,10 @@ final class AppSettings {
     var requestTimeout: Double { didSet { set(requestTimeout, "requestTimeout") } }
     var confirmDestructiveAgentActions: Bool { didSet { set(confirmDestructiveAgentActions, "confirmDestructive") } }
 
+    // Local AI
+    /// Gemini is called directly from the app for analysis and the agent.
+    var geminiModel: String { didSet { set(geminiModel, "geminiModel") } }
+
     /// Stored in the login Keychain, not in UserDefaults, and read on first use
     /// rather than in `init`.
     ///
@@ -80,7 +84,34 @@ final class AppSettings {
 
     @ObservationIgnored private var loadedAPIKey: String?
 
-    // Meetings
+    /// The Gemini key, in the same Keychain item store as the VPS token.
+    var geminiAPIKey: String {
+        get {
+            if loadedGeminiKey == nil { loadedGeminiKey = KeychainStore.get(.geminiKey) ?? "" }
+            return loadedGeminiKey ?? ""
+        }
+        set { commitGeminiAPIKey(newValue) }
+    }
+
+    private(set) var geminiKeyWriteFailed = false
+
+    @discardableResult
+    func commitGeminiAPIKey(_ value: String) -> Bool {
+        loadedGeminiKey = value
+        let stored = KeychainStore.set(value, for: .geminiKey)
+        geminiKeyWriteFailed = !stored
+        return stored
+    }
+
+    @ObservationIgnored private var loadedGeminiKey: String?
+
+    /// True when meeting analysis and the local agent can run.
+    var hasGeminiKey: Bool {
+        !geminiAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Local processing needs the Gemini key; the VPS path remains a fallback.
+    var canProcessMeetings: Bool { hasGeminiKey || backendIsConfigured }
     var captureMicrophone: Bool { didSet { set(captureMicrophone, "captureMicrophone") } }
     /// Off by default. Capturing the other side of a call needs ScreenCaptureKit,
     /// which means Screen Recording permission and a capture indicator in the menu
@@ -115,6 +146,7 @@ final class AppSettings {
         serverURL = string("serverURL", "")
         requestTimeout = double("requestTimeout", 20)
         confirmDestructiveAgentActions = bool("confirmDestructive", true)
+        geminiModel = string("geminiModel", "gemini-2.5-flash")
         captureMicrophone = bool("captureMicrophone", true)
         // System audio used to default on. Reset it once for anyone carrying the old
         // value, so nobody is stuck with a Screen Recording prompt they never wanted.

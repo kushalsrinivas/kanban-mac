@@ -18,6 +18,7 @@ enum KeychainStore {
 
     enum Key: String, CaseIterable {
         case apiToken = "api-token"
+        case geminiKey = "gemini-key"
     }
 
     @discardableResult

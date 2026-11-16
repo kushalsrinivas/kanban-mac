@@ -16,6 +16,10 @@ struct SettingsView: View {
     @State private var apiKeyDraft = ""
     @State private var apiKeyStored = false
     @FocusState private var apiKeyFocused: Bool
+    /// Gemini key used by the in-app analysis and agent.
+    @State private var geminiKeyDraft = ""
+    @State private var geminiKeyStored = false
+    @FocusState private var geminiKeyFocused: Bool
 
     private var archivedCount: Int { app.store.tasks.filter(\.isArchived).count }
 
@@ -31,6 +35,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 12) {
                 appearanceBlock(bindable)
                 tasksBlock(bindable)
+                localAIBlock(bindable)
                 backendBlock(bindable)
                 meetingsBlock(bindable)
                 notificationsBlock(bindable)
@@ -47,8 +52,13 @@ struct SettingsView: View {
             recordingsBytes = KanbanPaths.recordingsByteCount()
             apiKeyDraft = app.settings.apiKey
             apiKeyStored = !apiKeyDraft.isEmpty
+            geminiKeyDraft = app.settings.geminiAPIKey
+            geminiKeyStored = !geminiKeyDraft.isEmpty
         }
-        .onDisappear { commitAPIKey() }
+        .onDisappear {
+            commitAPIKey()
+            commitGeminiKey()
+        }
         .confirmationDialog("Delete every saved recording?",
                             isPresented: $confirmingRecordingPurge,
                             titleVisibility: .visible) {
@@ -221,7 +231,7 @@ struct SettingsView: View {
     }
 
     private func backendBlock(_ settings: Bindable<AppSettings>) -> some View {
-        block("vps") {
+        block("vps (optional sync)") {
             row("SERVER URL") {
                 field(text: settings.serverURL, placeholder: "https://vps.example.com")
             }
@@ -297,7 +307,60 @@ struct SettingsView: View {
                         .buttonStyle(PanelButtonStyle(compact: true))
                 }
             }
-            note("Transcription, analysis and the agent all run on your VPS. Tasks and recording keep working when it is unreachable.")
+            note("Transcription and analysis happen inside this app. A VPS is optional and only adds multi-device sync.")
+        }
+    }
+
+    private func localAIBlock(_ settings: Bindable<AppSettings>) -> some View {
+        block("local ai") {
+            row("GEMINI KEY") {
+                HStack(spacing: 8) {
+                    secureField(text: $geminiKeyDraft, placeholder: "AIza…")
+                        .focused($geminiKeyFocused)
+                        .onSubmit { commitGeminiKey() }
+                        .onChange(of: geminiKeyFocused) { _, focused in
+                            if !focused { commitGeminiKey() }
+                        }
+                    Button("SAVE") { commitGeminiKey() }
+                        .buttonStyle(PanelButtonStyle(compact: true))
+                    MicroLabel(geminiKeyStored ? "in keychain" : "not set")
+                }
+            }
+            if app.settings.geminiKeyWriteFailed {
+                note("Could not write the Gemini key to the keychain. Unlock the login keychain and press SAVE again.")
+            }
+            row("MODEL") {
+                field(text: settings.geminiModel, placeholder: "gemini-2.5-flash")
+            }
+            row("TRANSCRIPTION") {
+                if #available(macOS 26.0, *) {
+                    StatusDot(.on)
+                    Text("ON THIS MAC")
+                        .font(Theme.mono(10.5, weight: .medium))
+                        .tracking(0.6)
+                        .foregroundStyle(theme.ink)
+                } else {
+                    StatusDot(.alert)
+                    Text("NEEDS MACOS 26")
+                        .font(Theme.mono(10.5, weight: .medium))
+                        .tracking(0.6)
+                        .foregroundStyle(theme.signal)
+                }
+            }
+            note("Transcription runs on this Mac with Apple's on-device speech model. Only the transcript is sent to Gemini for analysis; recordings never leave this Mac.")
+            if #unavailable(macOS 26.0) {
+                note("On-device transcription needs macOS 26. Tasks and recording still work here.")
+            }
+        }
+    }
+
+    /// Commits the Gemini key only on submit, focus loss or close.
+    private func commitGeminiKey() {
+        let current = app.settings.geminiAPIKey
+        guard geminiKeyDraft != current || app.settings.geminiKeyWriteFailed else { return }
+        if app.settings.commitGeminiAPIKey(geminiKeyDraft) {
+            geminiKeyStored = !geminiKeyDraft.isEmpty
+            app.flash(geminiKeyDraft.isEmpty ? "GEMINI KEY REMOVED" : "GEMINI KEY SAVED")
         }
     }
 

@@ -286,7 +286,7 @@ struct MeetingDetailView: View {
                     .foregroundStyle(theme.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                if app.settings.backendIsConfigured {
+                if app.settings.canProcessMeetings {
                     if meeting.status == .localOnly {
                         // Respect the earlier decision, but leave an explicit way back.
                         Button("UPLOAD ANYWAY") { app.processRecording(meeting.id) }
@@ -303,7 +303,7 @@ struct MeetingDetailView: View {
                         }
                     }
                 } else {
-                    Text("Set a VPS URL in Settings to transcribe and analyse it.")
+                    Text("Add a Gemini API key in Settings → Local AI to transcribe and analyse it on this Mac.")
                         .font(Theme.mono(9.5))
                         .foregroundStyle(theme.inkTertiary)
                 }
@@ -321,7 +321,7 @@ struct MeetingDetailView: View {
                     .font(Theme.body)
                     .foregroundStyle(theme.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
-                if meeting.audioFilename != nil, app.settings.backendIsConfigured {
+                if meeting.audioFilename != nil, app.settings.canProcessMeetings {
                     Button("RESUME PROCESSING") { app.processRecording(meeting.id) }
                         .buttonStyle(PanelButtonStyle(prominent: true))
                 } else if meeting.audioFilename == nil {
