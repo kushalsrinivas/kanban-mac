@@ -358,6 +358,10 @@ struct SettingsView: View {
 
     private var selectedSpeechFile: ModelCatalog.File? {
         guard let entry = selectedSpeechModel else { return nil }
+        if app.settings.transcriptionQuant.isEmpty,
+           let installed = ModelStorage.installedFile(for: entry) {
+            return installed
+        }
         return entry.file(quant: app.settings.transcriptionQuant.isEmpty
                           ? nil : app.settings.transcriptionQuant)
     }
