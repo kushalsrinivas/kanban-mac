@@ -49,6 +49,19 @@ struct MeetingDetailView: View {
                             bulletList(meeting.questions)
                         }
                     }
+                }
+
+                if meeting.status == .completed, meeting.summary.isEmpty {
+                    Text("Transcribed on this Mac. Add a Gemini key in Settings → Local AI for a summary and action items.")
+                        .font(Theme.mono(9.5))
+                        .foregroundStyle(theme.inkTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                // A transcript-only meeting has no summary, and the list loads
+                // meetings without segments — so the gate has to see the
+                // transcript this view loaded, not just `meeting.hasResults`.
+                if meeting.hasResults || !transcript.isEmpty {
                     section(.transcript, badge: meeting.durationLabel) { transcriptBody }
                 }
             }
@@ -357,6 +370,11 @@ struct MeetingDetailView: View {
         transcript = meeting.transcript.isEmpty
             ? app.store.transcript(for: meeting.id)
             : meeting.transcript
+        // A meeting without a summary is being read for its transcript; open it
+        // rather than making the only content a folded row.
+        if meeting.summary.isEmpty, !transcript.isEmpty {
+            expanded.insert(.transcript)
+        }
     }
 }
 
