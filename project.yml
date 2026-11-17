@@ -94,6 +94,7 @@ targets:
       - path: Sources/Kanban/Core/AI/GeminiClient.swift
       - path: Sources/Kanban/Core/AI/LocalAgentPlan.swift
       - path: Sources/Kanban/Core/Transcription
+      - path: Sources/Kanban/Dictation/DictationSilenceDetector.swift
       - path: Resources/Kanban/catalog.json
         buildPhase: resources
       - path: Sources/Kanban/Meetings/Recording/SystemAudioCaptureEngine.swift

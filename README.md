@@ -136,6 +136,15 @@ title, status, priority and due date, and confirm. ADD ALL skips the per-item di
 not the decision. A task created this way keeps a link back to the meeting it came from,
 and deleting it puts the suggestion back.
 
+## Dictation
+
+Press **⌃⌥Space** anywhere on the Mac. A small floating card opens and starts
+listening; it stops after two seconds of silence, or when you press the hotkey
+again, and the transcript is put on the clipboard. The same on-device model as
+meetings transcribes it — nothing is uploaded. The card never takes focus, so it
+can sit over whatever you were typing in. Turn it off, or try it, in
+Settings → Dictation.
+
 ## The agent
 
 Reads answer inline. Writes come back as structured operations with a one-line summary,

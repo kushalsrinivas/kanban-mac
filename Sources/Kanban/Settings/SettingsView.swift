@@ -36,6 +36,7 @@ struct SettingsView: View {
                 appearanceBlock(bindable)
                 tasksBlock(bindable)
                 localAIBlock(bindable)
+                dictationBlock(bindable)
                 backendBlock(bindable)
                 meetingsBlock(bindable)
                 notificationsBlock(bindable)
@@ -349,6 +350,41 @@ struct SettingsView: View {
         }
     }
 
+
+    private func dictationBlock(_ settings: Bindable<AppSettings>) -> some View {
+        block("dictation") {
+            row("HOTKEY") {
+                HStack(spacing: 8) {
+                    Text(app.dictation.hotKeyLabel)
+                        .font(Theme.mono(10.5, weight: .medium))
+                        .tracking(0.6)
+                        .foregroundStyle(theme.ink)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(theme.panelAlt, in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                            .strokeBorder(theme.lineStrong, lineWidth: Theme.Metric.hairline))
+                    Button("TRY") { app.dictation.toggle() }
+                        .buttonStyle(PanelButtonStyle(compact: true))
+                    if !app.dictation.hotKeyAvailable {
+                        Text("IN USE")
+                            .font(Theme.mono(9))
+                            .foregroundStyle(theme.signal)
+                    }
+                }
+            }
+            row("ENABLED") {
+                PillToggle(isOn: app.settings.dictationEnabled) {
+                    settings.dictationEnabled.wrappedValue.toggle()
+                    app.dictation.setEnabled(settings.dictationEnabled.wrappedValue)
+                }
+            }
+            if let error = app.dictation.lastError, app.dictation.phase == .idle {
+                note(error)
+            }
+            note("Press ⌃⌥Space anywhere, speak, and the transcript lands on the clipboard. It stops after two seconds of silence, or press the hotkey again. The same on-device model as meetings transcribes it; nothing leaves this Mac.")
+        }
+    }
 
     // MARK: Speech model
 

@@ -30,6 +30,7 @@ final class AppModel {
     let catalog: ModelCatalog?
     let transcription: TranscriptionEngine
     let models: ModelDownloader
+    let dictation: DictationController
     let agent: AgentSession
     @ObservationIgnored private let notifications = NotificationCenterBridge()
 
@@ -108,6 +109,8 @@ final class AppModel {
         }
         self.processor = MeetingProcessor(store: store, client: client, settings: settings,
                                           engine: transcription, catalog: catalog)
+        self.dictation = DictationController(settings: settings, engine: transcription,
+                                             catalog: catalog)
         self.agent = AgentSession(store: store, client: client, settings: settings, sync: sync)
 
         store.onChange = { [weak self] _ in
@@ -156,6 +159,7 @@ final class AppModel {
         }
         #endif
         store.flush()
+        if settings.dictationEnabled { dictation.setEnabled(true) }
         #if DEBUG
         ScreenshotDriver.runIfRequested(self)
         #endif

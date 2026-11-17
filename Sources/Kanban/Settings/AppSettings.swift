@@ -60,6 +60,9 @@ final class AppSettings {
     /// Comma or newline separated terms passed to the model as vocabulary.
     var transcriptionVocabulary: String { didSet { set(transcriptionVocabulary, "transcriptionVocabulary") } }
 
+    /// Global ⌃⌥Space dictation: speak, get the transcript on the clipboard.
+    var dictationEnabled: Bool { didSet { set(dictationEnabled, "dictationEnabled") } }
+
     var vocabularyList: [String] {
         transcriptionVocabulary
             .split(whereSeparator: { $0 == "," || $0 == "\n" })
@@ -177,6 +180,7 @@ final class AppSettings {
         transcriptionModelID = string("transcriptionModelID", "whisper-small")
         transcriptionQuant = string("transcriptionQuant", "")
         transcriptionVocabulary = string("transcriptionVocabulary", "")
+        dictationEnabled = bool("dictationEnabled", true)
         captureMicrophone = bool("captureMicrophone", true)
         // System audio used to default on. Reset it once for anyone carrying the old
         // value, so nobody is stuck with a Screen Recording prompt they never wanted.

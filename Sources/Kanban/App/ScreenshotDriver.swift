@@ -75,6 +75,8 @@ enum ScreenshotDriver {
             // The Settings scene cannot be opened reliably from a headless launch;
             // render the real view offscreen instead.
             renderSettings(app: app, named: "09-settings-light", dark: false)
+            renderSettings(app: app, named: "19-settings-full-light", dark: false, height: 1180)
+            renderDictation(app: app, dark: false)
 
             app.settings.appearance = .dark
             app.section = .tasks
@@ -104,18 +106,41 @@ enum ScreenshotDriver {
         }
 
 
-        func renderSettings(app: AppModel, named name: String, dark: Bool) {
+        func renderSettings(app: AppModel, named name: String, dark: Bool, height: CGFloat = 660) {
             let view = SettingsView()
                 .environment(app)
                 .environment(\.theme, Theme.resolved(dark: dark, accent: app.settings.accent))
             let hosting = NSHostingView(rootView: view)
-            hosting.frame = NSRect(x: 0, y: 0, width: 580, height: 660)
+            hosting.frame = NSRect(x: 0, y: 0, width: 580, height: height)
             hosting.layoutSubtreeIfNeeded()
             hosting.displayIfNeeded()
             guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { return }
             hosting.cacheDisplay(in: hosting.bounds, to: rep)
             guard let data = rep.representation(using: .png, properties: [:]) else { return }
             try? data.write(to: directory.appendingPathComponent("\(name).png"))
+        }
+
+        func renderDictation(app: AppModel, dark: Bool) {
+            let states: [(String, DictationPanelModel.State)] = [
+                ("16-dictation-listening", .listening),
+                ("17-dictation-transcribing", .transcribing),
+                ("18-dictation-copied", .copied),
+            ]
+            for (name, state) in states {
+                let model = DictationPanelModel()
+                model.state = state
+                model.level = 0.7
+                let view = DictationPanelView(model: model)
+                    .environment(\.theme, Theme.resolved(dark: dark, accent: app.settings.accent))
+                let hosting = NSHostingView(rootView: view)
+                hosting.frame = NSRect(x: 0, y: 0, width: 330, height: 68)
+                hosting.layoutSubtreeIfNeeded()
+                hosting.displayIfNeeded()
+                guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { continue }
+                hosting.cacheDisplay(in: hosting.bounds, to: rep)
+                guard let data = rep.representation(using: .png, properties: [:]) else { continue }
+                try? data.write(to: directory.appendingPathComponent("\(name).png"))
+            }
         }
 
         func mainWindow() -> NSWindow? {
