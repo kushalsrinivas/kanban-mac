@@ -294,7 +294,7 @@ public struct TaskService {
             position: task.position)
     }
 
-    static func normalise(_ tags: [String]) -> [String] {
+    nonisolated static func normalise(_ tags: [String]) -> [String] {
         var seen = Set<String>()
         return tags
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " #")).lowercased() }

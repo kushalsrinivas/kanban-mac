@@ -215,6 +215,8 @@ public struct MeetingDTO: Codable, Sendable, Equatable {
             // the server sends `state`; otherwise keep the user's local decision.
             let decided = Dictionary(uniqueKeysWithValues:
                 meeting.actionItems.filter { $0.state != .suggested }.map { ($0.id, $0) })
+            let localByID = Dictionary(uniqueKeysWithValues:
+                meeting.actionItems.map { ($0.id, $0) })
             meeting.actionItems = remote.enumerated().compactMap { index, dto in
                 guard var item = dto.toActionItem(meetingID: meeting.id, position: Double(index)) else { return nil }
                 // The server is authoritative only once it has a real decision.
@@ -227,6 +229,18 @@ public struct MeetingDTO: Codable, Sendable, Equatable {
                 } else if let existing = decided[item.id] {
                     item.state = existing.state
                     item.taskID = existing.taskID
+                }
+                // Same rule for execution state: an unsynced local DONE must not be
+                // reopened by the server's default "open".
+                if item.commitmentState == .open, let local = localByID[item.id],
+                   local.commitmentState != .open {
+                    item.commitmentState = local.commitmentState
+                    item.completedAt = local.completedAt
+                }
+                if item.quote == nil, let local = localByID[item.id] {
+                    item.quote = local.quote
+                    item.sourceStart = local.sourceStart
+                    item.sourceEnd = local.sourceEnd
                 }
                 return item
             }
@@ -249,9 +263,19 @@ public struct ActionItemDTO: Codable, Sendable, Equatable {
     public var state: String?
     /// The task the server linked when the suggestion was accepted.
     public var taskId: String?
+    /// Verbatim source and transcript position, when the server kept them.
+    public var quote: String?
+    public var sourceStart: Double?
+    public var sourceEnd: Double?
+    public var commitmentState: String?
+    public var completedAt: String?
+    public var remindedAt: String?
 
     public init(id: String, title: String, assignee: String? = nil, dueDate: String? = nil,
-                confidence: Double? = nil, state: String? = nil, taskId: String? = nil) {
+                confidence: Double? = nil, state: String? = nil, taskId: String? = nil,
+                quote: String? = nil, sourceStart: Double? = nil, sourceEnd: Double? = nil,
+                commitmentState: String? = nil, completedAt: String? = nil,
+                remindedAt: String? = nil) {
         self.id = id
         self.title = title
         self.assignee = assignee
@@ -259,6 +283,12 @@ public struct ActionItemDTO: Codable, Sendable, Equatable {
         self.confidence = confidence
         self.state = state
         self.taskId = taskId
+        self.quote = quote
+        self.sourceStart = sourceStart
+        self.sourceEnd = sourceEnd
+        self.commitmentState = commitmentState
+        self.completedAt = completedAt
+        self.remindedAt = remindedAt
     }
 
     /// nil unless the server actually sent a recognised state.
@@ -272,7 +302,12 @@ public struct ActionItemDTO: Codable, Sendable, Equatable {
         return ActionItem(id: uuid, meetingID: meetingID, title: title, assignee: assignee,
                           dueDate: dueDate.flatMap { DateInput.parse($0) },
                           confidence: confidence ?? 0, state: decidedState ?? .suggested,
-                          taskID: taskId.flatMap(UUID.init(uuidString:)), position: position)
+                          taskID: taskId.flatMap(UUID.init(uuidString:)), position: position,
+                          quote: quote, sourceStart: sourceStart, sourceEnd: sourceEnd,
+                          commitmentState: commitmentState
+                            .flatMap(ActionItem.Commitment.init(rawValue:)) ?? .open,
+                          completedAt: completedAt.flatMap { DateInput.parse($0) },
+                          remindedAt: remindedAt.flatMap { DateInput.parse($0) })
     }
 }
 

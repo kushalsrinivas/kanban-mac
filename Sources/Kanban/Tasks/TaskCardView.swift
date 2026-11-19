@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// A task rendered as an instrument module: title block, hairline, metadata strip.
-/// No colour coding, no shadow, no hover animation beyond a 1px border change.
+/// The fill is tinted by priority — a quiet temperature ramp, not a traffic light.
+/// No shadow, no hover animation beyond a 1px border change.
 struct TaskCardView: View {
     @Environment(\.theme) private var theme
 
@@ -86,7 +87,7 @@ struct TaskCardView: View {
         }
         .padding(Theme.Metric.cardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+        .background(theme.priorityFill(task.priority), in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
         .overlay(alignment: .leading) {
             // Selection reads as a machined notch on the left edge, not a highlight.
             if isSelected {

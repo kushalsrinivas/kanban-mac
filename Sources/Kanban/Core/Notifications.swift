@@ -10,6 +10,11 @@ final class NotificationCenterBridge {
 
     private let center = UNUserNotificationCenter.current()
     private var scheduledSignature: Int = 0
+    /// Identifiers we added, so each reschedule removes only its own category and
+    /// task reminders cannot wipe commitment or brief alerts.
+    private var taskIDs: [String] = []
+    private var commitmentIDs: [String] = []
+    private var briefIDs: [String] = []
 
     func requestAuthorisation(_ completion: @escaping (Bool) -> Void) {
         center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
@@ -21,7 +26,8 @@ final class NotificationCenterBridge {
     /// Called after mutations (already coalesced by the store).
     func reschedule(for tasks: [TaskItem], enabled: Bool) {
         guard enabled else {
-            center.removeAllPendingNotificationRequests()
+            center.removePendingNotificationRequests(withIdentifiers: taskIDs)
+            taskIDs.removeAll()
             scheduledSignature = 0
             return
         }
@@ -42,7 +48,8 @@ final class NotificationCenterBridge {
         guard signature != scheduledSignature else { return }
         scheduledSignature = signature
 
-        center.removeAllPendingNotificationRequests()
+        center.removePendingNotificationRequests(withIdentifiers: taskIDs)
+        taskIDs.removeAll()
         let calendar = Calendar.current
         for task in upcoming {
             guard let due = task.dueDate else { continue }
@@ -54,7 +61,57 @@ final class NotificationCenterBridge {
 
             let components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: due)
             let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
-            center.add(UNNotificationRequest(identifier: "due-\(task.id.uuidString)",
+            let identifier = "due-\(task.id.uuidString)"
+            taskIDs.append(identifier)
+            center.add(UNNotificationRequest(identifier: identifier,
+                                             content: content, trigger: trigger))
+        }
+    }
+
+    /// Commitments are promises, not tasks; they get their own identifier prefix so a
+    /// board edit cannot remove them.
+    func rescheduleCommitments(_ commitments: [(item: ActionItem, meeting: Meeting)],
+                               enabled: Bool) {
+        center.removePendingNotificationRequests(withIdentifiers: commitmentIDs)
+        commitmentIDs.removeAll()
+        guard enabled else { return }
+        let now = Date()
+        let calendar = Calendar.current
+        for (item, meeting) in commitments.prefix(32) {
+            guard item.isOpen, let due = item.dueDate, due > now else { continue }
+            let content = UNMutableNotificationContent()
+            content.title = "Commitment: \(item.title)"
+            content.body = "From \(meeting.title) · due \(DateInput.shortLabel(due).lowercased())"
+            content.threadIdentifier = "kanban.commitment"
+            let components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: due)
+            let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+            let identifier = "commit-\(item.id.uuidString)"
+            commitmentIDs.append(identifier)
+            center.add(UNNotificationRequest(identifier: identifier,
+                                             content: content, trigger: trigger))
+        }
+    }
+
+    /// A pre-meeting brief is useful only if it arrives before the meeting.
+    func scheduleBriefs(_ briefs: [(meeting: ScheduledMeeting, summary: String)],
+                        enabled: Bool) {
+        center.removePendingNotificationRequests(withIdentifiers: briefIDs)
+        briefIDs.removeAll()
+        guard enabled else { return }
+        let now = Date()
+        for (meeting, summary) in briefs.prefix(24) {
+            let fireAt = meeting.startsAt.addingTimeInterval(-15 * 60)
+            guard fireAt > now else { continue }
+            let content = UNMutableNotificationContent()
+            content.title = "Brief: \(meeting.title)"
+            content.body = String(summary.prefix(220))
+            content.threadIdentifier = "kanban.brief"
+            let components = Calendar.current.dateComponents(
+                [.year, .month, .day, .hour, .minute], from: fireAt)
+            let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+            let identifier = "brief-\(meeting.id.uuidString)"
+            briefIDs.append(identifier)
+            center.add(UNNotificationRequest(identifier: identifier,
                                              content: content, trigger: trigger))
         }
     }

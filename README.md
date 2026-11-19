@@ -26,7 +26,15 @@ provisioning profile. Swap in your team in `project.yml` to notarise.
 Without any setup the app is a complete local task manager: the board, search, the
 palette and recording all work. In Settings → Local AI, download a whisper model and
 add a Gemini API key to transcribe and analyse meetings on this Mac and to use the
-agent. Set Settings → VPS only if you want the optional server sync.
+agent. Set Settings → VPS only if you want the optional server sync. The agent's
+local reads, artifacts and confirmed writes work without it.
+
+## Navigation
+
+The main sections live in a left navigation drawer rather than a header tab strip.
+It keeps the counts visible, marks anything that needs a decision, and collapses to
+a 64pt icon rail (`⌃⌘S`) when the board needs the width. The choice is remembered
+across launches.
 
 ## Layout
 
@@ -36,6 +44,7 @@ Sources/
 │   ├── Core/Models      Task, Meeting, dates, quick-add parsing
 │   ├── Core/Database    SQLite wrapper, schema, the local cache + outbox
 │   ├── Core/Networking  wire DTOs, the local task service
+│   ├── Meetings         local memory, commitments and automation engines
 │   ├── Design           the visual system
 │   └── Snapshot         the small file the widget reads
 ├── Kanban/              the app
@@ -44,8 +53,10 @@ Sources/
 │   ├── Core/Transcription  whisper engine, chunker, model catalog and downloads
 │   ├── Tasks/           board, cards, inspector, quick add
 │   ├── Meetings/        recorder, capture engine, processing, results, suggestions
+│   ├── Calendar/        EventKit bridge, briefs, commitments, memory, automation
 │   ├── Agent/           the console
 │   ├── MenuBar/  Settings/  App/
+├── MeetingsMCP/         the local stdio MCP server
 └── KanbanWidget/        Today widget
 ```
 
@@ -136,6 +147,67 @@ title, status, priority and due date, and confirm. ADD ALL skips the per-item di
 not the decision. A task created this way keeps a link back to the meeting it came from,
 and deleting it puts the suggestion back.
 
+## The Meet workspace
+
+`⌘⌥4` opens MEET: four local surfaces built on the same SQLite database. No VPS and
+no model call is required to use them.
+
+**Briefs.** Upcoming meetings come from two places: schedules the agent created, and
+the Google/Outlook accounts macOS already has. The app reads EventKit, so adding the
+account in System Settings → Internet Accounts is the whole integration — no OAuth
+client or refresh token. Each brief answers four questions before you walk in: what
+did we discuss last time, what did we promise, what decisions are still open, and does
+this collide with anything. When there is a conflict it proposes open working-hour
+slots. Briefs are generated for the next two weeks on launch, on app activation and
+whenever the calendar refreshes, and a local notification fires 15 minutes before a
+meeting with the one-paragraph summary.
+
+**Commitments.** Every extracted action item also keeps the verbatim sentence that
+made it and the transcript second it was said (`⌘`-click the timestamp to open the
+transcript). The review state (suggested/added/dismissed) and the execution state
+(open/done/cancelled) are separate, so dismissing a suggestion cannot complete a
+promise. DONE on a commitment completes its linked board task, and reopening the
+commitment reopens the task. REMIND composes a local notice and schedules the next
+one at the due time.
+
+**Memory.** Search across decisions, commitments, discussions, open questions and
+raw transcript text for any date range or participant. ASK answers locally and
+extractively, with citations, so it works offline; when a later decision reverses an
+earlier one the answer explains both dates instead of silently returning the newest.
+CONTRADICTIONS lists possible reversals as candidates, with the shared vocabulary
+that caused the match. Nothing is presented as a fact the transcript does not support.
+
+**Automation.** ADD STANDARD creates the rule from the product brief: draft a summary,
+draft a follow-up, create tasks and notify commitment owners when a meeting ends.
+Rules are editable rows — name, trigger, title/participant/duration conditions and
+actions, including pushing tasks to an external project board through its incoming
+webhook. A rule run writes an audit row; emails are composed as drafts in
+DRAFTS & NOTIFICATIONS and open in the default mail client. Nothing is sent silently.
+
+## Local MCP
+
+`MeetMCP` is a stdio Model Context Protocol server over the same database, so another
+agent can use the Mac's meeting memory when the app is closed and no server exists.
+
+```
+xcodebuild -project Kanban.xcodeproj -scheme MeetMCP build
+# binary in DerivedData/Build/Products/Debug/MeetMCP
+```
+
+Point an MCP client at that path:
+
+```json
+{ "mcpServers": { "meet": { "command": "/absolute/path/to/MeetMCP" } } }
+```
+
+Set `KANBAN_SUPPORT_DIR` only if the app was run with a non-default support
+directory. It exposes `search_meetings`, `get_meeting`,
+`search_memory`, `ask_memory`, `list_commitments`, `complete_commitment`,
+`create_task`, `list_upcoming_meetings`, `get_meeting_brief`,
+`list_automation_rules` and `list_drafts`. Writes go through `TaskService` and
+`LocalStore` — the same path the UI uses. The server build has a matching MCP
+endpoint at `POST /api/v1/mcp` for the sync deployment.
+
 ## Dictation
 
 Press **⌃⌥Space** anywhere on the Mac. A small floating card opens and starts
@@ -147,10 +219,40 @@ Settings → Dictation.
 
 ## The agent
 
-Reads answer inline. Writes come back as structured operations with a one-line summary,
-and sit there until you press EXECUTE. The Mac validates every proposed operation
-against the local store — an invented task id or an unparseable date is dropped rather
-than guessed at — and then applies it. Destructive operations are marked.
+The console is a workspace over the real board, meetings and recordings, not a text
+box. Reads are answered from the local SQLite cache, so they work offline and without
+an API key: "what's on my todo", "show my recent meetings", "summarize the second one",
+"what tasks came out of it", "find my last recording".
+
+Answers are typed artifacts — task lists, meeting cards, structured summaries,
+recording players, transcript snippets, action items and participant cards — rendered
+by `AgentArtifactRegistry`. Each card links to the real destination (Open Meeting,
+Open Task, Play Recording, View Transcript) and uses the app's existing routes.
+
+Writes are proposals, not actions. The planner (or a model, when one is configured)
+produces a validated `AgentOperation`; the Mac shows it in PROPOSED OPERATIONS and
+applies it only after EXECUTE. `AgentExecutor` is the single write path, so a typed
+command and a model proposal cannot diverge. Invented ids, unparseable dates and
+ambiguous selectors are dropped or answered with a choice instead of guessed at.
+
+Conversation state lives in `AgentContext`: the last meeting list, the last task list
+and what "it" refers to. That is what makes "show my recent meetings" → "summarize
+the second one" → "what tasks came out of it?" → "play its recording" work without
+repeating the meeting name. The deterministic planner is consulted first; a model is
+only asked after it reports a miss. A bare "the first one" also answers the
+"Which meeting?" question the assistant just asked.
+
+Scheduling is local, too. "Schedule a meeting about onboarding with Sarah tomorrow at
+2pm for 45 minutes" becomes a pending `ScheduledMeetingDraft`; EXECUTE writes it to
+the Mac's SQLite store and the Calendar section opens it. Briefs are built from
+meetings, action items, decisions and tasks already on the Mac. Optional EventKit
+system-calendar events are read-only and never written by the app.
+
+Open-ended Gemini turns stream the reply field from `streamGenerateContent?alt=sse`;
+`AgentStreamParser` tolerates split JSON escapes and `AgentStreamReader` stops the
+moment the user presses CANCEL, keeping the partial answer. Local deterministic
+answers are atomic because they are SQLite reads. The VPS fallback still returns one
+response: its LangGraph decision loop is not token-streamed.
 
 ## Keyboard
 
@@ -163,6 +265,8 @@ than guessed at — and then applies it. Destructive operations are marked.
 | `⌘⇧1`–`⌘⇧4` | move the selected task |
 | `⌘R` | start / stop recording |
 | `⌘⌥1/2/3` | tasks / meetings / agent |
+| `⌘⌥4` | meet (briefs, commitments, memory, automation) |
+| `⌃⌘S` | collapse / expand the navigation drawer |
 | `↑ ↓ ← →` | move the selection |
 | `⌥↑ ⌥↓` | reorder within a column |
 | `space` | complete |
@@ -178,9 +282,12 @@ xcodebuild -project Kanban.xcodeproj -scheme KanbanTests \
   -destination 'platform=macOS,arch=arm64' test
 ```
 
-103 tests at the time of writing (one fixture generator is skipped unless explicitly enabled): store and migrations, the outbox, the task
+200 tests at the time of writing (one fixture generator is skipped unless explicitly enabled): store and migrations, the outbox, the task
 service, wire DTOs, date and quick-add parsing, snapshot generation,
-capture-source reporting.
+capture-source reporting, the agent planner/artifact engine, the shared agent
+operation executor, and the local meeting brain: commitment sources and task sync,
+month-spanning memory search and cited answers, contradiction candidates, brief
+conflicts and free-time suggestions, and local automation rules/drafts.
 
 `FixtureGenerator` writes `Tests/Fixtures/*.json` from the real encoders, but only
 when `KANBAN_WRITE_FIXTURES=1` is set — otherwise a test run would rewrite tracked

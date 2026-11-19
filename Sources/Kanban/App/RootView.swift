@@ -9,6 +9,9 @@ struct RootView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var focus: FocusTarget?
+    /// A sidebar is a navigation drawer: it can collapse to an icon rail without
+    /// losing the current section. Remembered across launches.
+    @AppStorage("nav.sidebar.expanded") private var sidebarExpanded = true
 
     var body: some View {
         @Bindable var app = app
@@ -17,25 +20,28 @@ struct RootView: View {
             app.theme.paper.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                TitleBar()
+                TitleBar(sidebarExpanded: $sidebarExpanded)
                     .padding(.horizontal, Theme.Metric.gutter)
                     .padding(.top, 6)
 
-                SectionTabs()
-                    .padding(.horizontal, Theme.Metric.gutter)
-                    .padding(.top, 10)
+                HStack(spacing: 0) {
+                    Sidebar(expanded: $sidebarExpanded)
+                        .transition(.move(edge: .leading).combined(with: .opacity))
 
-                // ZStack, not Group: a switch inside Group is not an insertion
-                // container, so the cross-fade never ran.
-                ZStack {
-                    switch app.section {
-                    case .tasks: tasksSection.transition(.opacity)
-                    case .meetings: MeetingsView().padding(.top, 10).transition(.opacity)
-                    case .agent: AgentConsoleView(focus: $focus).padding(.top, 10).transition(.opacity)
+                    // ZStack, not Group: a switch inside Group is not an insertion
+                    // container, so the cross-fade never ran.
+                    ZStack {
+                        switch app.section {
+                        case .tasks: tasksSection.transition(.opacity)
+                        case .meetings: MeetingsView().padding(.top, 10).transition(.opacity)
+                        case .agent: AgentConsoleView(focus: $focus).padding(.top, 10).transition(.opacity)
+                        case .calendar: CalendarView().padding(.top, 10).transition(.opacity)
+                        }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: app.section)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: app.section)
 
                 StatusFooter()
             }
@@ -192,11 +198,13 @@ struct RootView: View {
 private struct TitleBar: View {
     @Environment(\.theme) private var theme
     @Environment(AppModel.self) private var app
+    @Binding var sidebarExpanded: Bool
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(app.section == .tasks ? "TASK SYSTEM"
-                 : app.section == .meetings ? "MEETINGS" : "AGENT")
+                 : app.section == .meetings ? "MEETINGS"
+                 : app.section == .agent ? "AGENT" : "MEET")
                 .font(Theme.display(24, weight: .medium))
                 .tracking(-0.2)
                 .foregroundStyle(theme.ink)
@@ -233,6 +241,15 @@ private struct TitleBar: View {
             }
 
             ConnectionBadge()
+
+            Button { sidebarExpanded.toggle() } label: {
+                Image(systemName: "sidebar.left").font(.system(size: 10))
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PanelButtonStyle(compact: true))
+            .help(sidebarExpanded ? "Collapse navigation (⌃⌘S)" : "Expand navigation (⌃⌘S)")
+            .accessibilityLabel(sidebarExpanded ? "Collapse navigation" : "Expand navigation")
 
             Button { app.toggleSearch() } label: {
                 Image(systemName: "magnifyingglass").font(.system(size: 10))
@@ -315,51 +332,138 @@ private struct ConnectionBadge: View {
     }
 }
 
-// MARK: - Section tabs
+// MARK: - Sidebar
 
-private struct SectionTabs: View {
+/// The main navigation drawer. It replaces the old header tabs: the categories are
+/// always visible, carry their counts, and can collapse to a compact rail when the
+/// board needs the width.
+private struct Sidebar: View {
     @Environment(\.theme) private var theme
     @Environment(AppModel.self) private var app
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Binding var expanded: Bool
+
+    /// Deliberately explicit: MEET belongs beside the recordings it summarises, and
+    /// the agent stays last as the conversational surface.
+    private let order: [AppModel.Section] = [.tasks, .meetings, .calendar, .agent]
 
     var body: some View {
-        HStack(spacing: 0) {
-            ForEach(AppModel.Section.allCases, id: \.self) { section in
-                let active = app.section == section
-                Button { app.section = section } label: {
-                    HStack(spacing: 5) {
-                        Text(section.label)
-                            .font(Theme.mono(10.5, weight: active ? .semibold : .regular))
-                            .tracking(1)
-                        if let badge = badge(for: section) {
-                            if section == .meetings {
-                                // A count alone reads as "meetings"; the dot says an
-                                // item needs review.
-                                Circle()
-                                    .fill(theme.signal)
-                                    .overlay(Circle().strokeBorder(active ? theme.paper : .clear, lineWidth: 1))
-                                    .frame(width: 5, height: 5)
-                            }
-                            Text(badge)
-                                .font(Theme.mono(9))
-                                .monospacedDigit()
-                                .foregroundStyle(active ? theme.paper.opacity(0.7) : theme.inkTertiary)
-                        }
-                    }
-                    .foregroundStyle(active ? theme.paper : theme.inkSecondary)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 5)
-                    .background(active ? theme.ink : Color.clear)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(helpText(for: section))
-            }
-            Spacer()
+        VStack(alignment: .leading, spacing: 0) {
+            brand
+            Rule()
+            nav
+            Spacer(minLength: 0)
+            if app.recorder.isRecording { recording }
+            Rule()
+            footer
         }
+        .frame(width: expanded ? 208 : 64)
         .background(theme.panelAlt)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-            .strokeBorder(theme.lineStrong, lineWidth: Theme.Metric.hairline))
+        .overlay(alignment: .trailing) {
+            Rectangle().fill(theme.lineStrong).frame(width: Theme.Metric.hairline)
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: expanded)
+    }
+
+    private var brand: some View {
+        HStack(spacing: 9) {
+            Text("WC")
+                .font(Theme.mono(10, weight: .semibold))
+                .tracking(0.5)
+                .foregroundStyle(theme.paper)
+                .frame(width: 28, height: 28)
+                .background(theme.ink, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .accessibilityHidden(true)
+
+            if expanded {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("WORK CONSOLE")
+                        .font(Theme.mono(9.5, weight: .semibold))
+                        .tracking(1)
+                        .foregroundStyle(theme.ink)
+                    Text("LOCAL-FIRST")
+                        .font(Theme.mono(8))
+                        .tracking(0.8)
+                        .foregroundStyle(theme.inkTertiary)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, expanded ? 12 : 0)
+        .frame(maxWidth: .infinity, alignment: expanded ? .leading : .center)
+        .padding(.vertical, 12)
+    }
+
+    private var nav: some View {
+        VStack(spacing: 3) {
+            ForEach(order, id: \.self) { section in
+                SidebarItem(section: section, expanded: expanded,
+                            badge: badge(for: section), alert: alert(for: section)) {
+                    app.section = section
+                }
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 10)
+    }
+
+    private var recording: some View {
+        Button { app.section = .meetings } label: {
+            HStack(spacing: 7) {
+                Circle().fill(theme.signal).frame(width: 6, height: 6)
+                if expanded {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("RECORDING")
+                            .font(Theme.mono(8.5, weight: .semibold))
+                            .tracking(0.6)
+                            .foregroundStyle(theme.signal)
+                        Text(Meeting.timecode(app.recorder.elapsed))
+                            .font(Theme.mono(10, weight: .medium))
+                            .monospacedDigit()
+                            .foregroundStyle(theme.ink)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+            .padding(.horizontal, expanded ? 12 : 0)
+            .frame(maxWidth: .infinity, alignment: expanded ? .leading : .center)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Recording — open meetings")
+    }
+
+    private var footer: some View {
+        VStack(spacing: 4) {
+            Button {
+                expanded.toggle()
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: expanded ? "sidebar.left" : "sidebar.right")
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(width: 18)
+                    if expanded {
+                        Text("COLLAPSE")
+                            .font(Theme.mono(9))
+                            .tracking(0.8)
+                        Spacer(minLength: 0)
+                        Text("⌃⌘S")
+                            .font(Theme.mono(8.5))
+                            .foregroundStyle(theme.inkTertiary)
+                    }
+                }
+                .foregroundStyle(theme.inkSecondary)
+                .padding(.horizontal, expanded ? 12 : 0)
+                .frame(maxWidth: .infinity, alignment: expanded ? .leading : .center)
+                .padding(.vertical, 9)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(expanded ? "Collapse navigation" : "Expand navigation")
+            .keyboardShortcut("s", modifiers: [.control, .command])
+        }
+        .padding(.vertical, 4)
     }
 
     private func badge(for section: AppModel.Section) -> String? {
@@ -370,21 +474,100 @@ private struct SectionTabs: View {
         case .meetings:
             let suggestions = app.openSuggestionCount
             return suggestions > 0 ? "\(suggestions)" : nil
+        case .calendar:
+            let upcoming = app.upcomingMeetings().count
+            return upcoming > 0 ? String(format: "%02d", upcoming) : nil
         case .agent:
-            return nil
+            let pending = app.agent.pending.count
+            return pending > 0 ? "\(pending)" : nil
         }
     }
 
-    private func helpText(for section: AppModel.Section) -> String {
+    /// The count says "there is work here"; the dot says "something needs a
+    /// decision". Only meetings and overdue commitments earn red.
+    private func alert(for section: AppModel.Section) -> Bool {
         switch section {
-        case .tasks:
-            return "\(app.store.counts().open) open tasks"
         case .meetings:
-            let suggestions = app.openSuggestionCount
-            return suggestions == 0 ? "Meetings and recordings"
-                : "\(suggestions) task\(suggestions == 1 ? "" : "s") to review"
-        case .agent:
-            return "Agent console"
+            return app.openSuggestionCount > 0
+        case .calendar:
+            return !app.store.overdueCommitments.isEmpty
+        default:
+            return false
+        }
+    }
+}
+
+private struct SidebarItem: View {
+    @Environment(\.theme) private var theme
+    @Environment(AppModel.self) private var app
+    let section: AppModel.Section
+    let expanded: Bool
+    let badge: String?
+    let alert: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    private var active: Bool { app.section == section }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: active ? .semibold : .regular))
+                    .frame(width: 18, alignment: .center)
+                    .overlay(alignment: .topTrailing) {
+                        if !expanded && alert {
+                            Circle().fill(theme.signal).frame(width: 5, height: 5)
+                                .offset(x: 3, y: -2)
+                        }
+                    }
+
+                if expanded {
+                    Text(section.label)
+                        .font(Theme.mono(10, weight: active ? .semibold : .regular))
+                        .tracking(0.9)
+                    Spacer(minLength: 0)
+                    if alert {
+                        Circle().fill(active ? theme.paper : theme.signal)
+                            .frame(width: 5, height: 5)
+                    }
+                    if let badge {
+                        Text(badge)
+                            .font(Theme.mono(9))
+                            .monospacedDigit()
+                            .foregroundStyle(active ? theme.paper.opacity(0.7) : theme.inkTertiary)
+                    }
+                }
+            }
+            .foregroundStyle(active ? theme.paper : theme.inkSecondary)
+            .padding(.horizontal, expanded ? 10 : 0)
+            .frame(maxWidth: .infinity, alignment: expanded ? .leading : .center)
+            .padding(.vertical, 8)
+            .background(active ? theme.ink : (hovering ? theme.panel : Color.clear),
+                        in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(tooltip)
+    }
+
+    private var icon: String {
+        switch section {
+        case .tasks: return "rectangle.split.3x1"
+        case .meetings: return "waveform"
+        case .calendar: return "calendar.badge.clock"
+        case .agent: return "terminal"
+        }
+    }
+
+    private var tooltip: String {
+        let count = badge.map { " · \($0)" } ?? ""
+        switch section {
+        case .tasks: return "\(app.store.counts().open) open task\(app.store.counts().open == 1 ? "" : "s")\(count)"
+        case .meetings: return "Meetings and recordings\(count)"
+        case .calendar: return "Briefs, commitments, memory and automation\(count)"
+        case .agent: return "Agent console\(count)"
         }
     }
 }
@@ -439,6 +622,8 @@ private struct StatusFooter: View {
             MicroLabel("⏎ OPEN")
             MicroLabel("⌘1-4 COLUMN")
             MicroLabel("⌘R RECORD")
+            MicroLabel("⌘⇧A AGENT")
+            MicroLabel("⌘⌥4 MEET")
             Spacer(minLength: 0)
             if let error = app.store.lastError {
                 Text("STORAGE ERROR")

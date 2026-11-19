@@ -267,7 +267,7 @@ final class MeetingProcessor {
             duration: store.meeting(meetingID)?.duration ?? meeting.duration,
             transcript: result.text)
         try ensureCurrent(meetingID, generation)
-        apply(analysis, to: meetingID)
+        apply(analysis, to: meetingID, segments: result.segments)
     }
 
     private func setProgress(_ meetingID: UUID, _ fraction: Double, _ detail: String,
@@ -284,7 +284,8 @@ final class MeetingProcessor {
         active[meetingID] = progress
     }
 
-    private func apply(_ analysis: MeetingAnalysis, to meetingID: UUID) {
+    private func apply(_ analysis: MeetingAnalysis, to meetingID: UUID,
+                       segments: [TranscriptSegment]) {
         guard let meeting = store.meeting(meetingID) else { return }
         // Preserve decisions the user already made; the new analysis only adds
         // suggestions. Matching by title is the same rule the server uses.
@@ -302,7 +303,8 @@ final class MeetingProcessor {
                 dueDate: suggestion.dueDate.flatMap { DateInput.parse($0) },
                 confidence: min(1, max(0, suggestion.confidence ?? 0)),
                 state: .suggested,
-                position: Double(items.count)))
+                position: Double(items.count),
+                quote: suggestion.quote?.trimmingCharacters(in: .whitespacesAndNewlines)))
         }
 
         store.updateMeeting(meetingID) {
@@ -316,6 +318,12 @@ final class MeetingProcessor {
             $0.status = .completed
             $0.processedAt = Date()
             $0.failureReason = nil
+        }
+
+        // Link each quote to the segment that said it, so a commitment can be
+        // played back instead of trusted as a paraphrase.
+        if let finished = store.meeting(meetingID) {
+            store.upsertMeeting(MeetingMemory.attachSources(to: finished, segments: segments))
         }
     }
 

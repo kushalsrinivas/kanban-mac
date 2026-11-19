@@ -25,6 +25,7 @@ struct MeetingDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 header
+                playbackBar
 
                 if let progress = app.processor.progress(for: meeting.id) {
                     ProcessingPanel(progress: progress, meeting: meeting)
@@ -69,9 +70,31 @@ struct MeetingDetailView: View {
         }
         .scrollIndicators(.never)
         .deleteMeetingConfirmation(meeting, isPresented: $confirmingDelete)
-        .onAppear(perform: loadTranscript)
-        .onChange(of: meeting.id) { _, _ in loadTranscript() }
+        .onAppear {
+            loadTranscript()
+            applyFocus()
+        }
+        .onChange(of: meeting.id) { _, _ in
+            loadTranscript()
+            applyFocus()
+        }
         .onChange(of: meeting.status) { _, new in if new == .completed { loadTranscript() } }
+        .onChange(of: app.meetingFocus) { _, _ in applyFocus() }
+    }
+
+    /// The agent can open a meeting on the section it was asked about.
+    private func applyFocus() {
+        guard let focus = app.meetingFocus else { return }
+        switch focus {
+        case .summary: expanded = [.summary, .actionItems]
+        case .actionItems: expanded = [.actionItems]
+        case .decisions: expanded = [.decisions]
+        case .questions: expanded = [.questions]
+        case .transcript:
+            expanded = [.transcript]
+            if transcript.isEmpty { transcript = app.store.transcript(for: meeting.id) }
+        }
+        app.meetingFocus = nil
     }
 
     private var badge: String {
@@ -122,6 +145,68 @@ struct MeetingDetailView: View {
             Rule()
         }
         .padding(.top, 2)
+    }
+
+    // MARK: Playback
+
+    private var player: RecordingPlayer { app.agent.player }
+
+    private var canPlay: Bool {
+        if let filename = meeting.audioFilename,
+           FileManager.default.fileExists(atPath: KanbanPaths.recordingURL(filename: filename).path) {
+            return true
+        }
+        return meeting.remoteID != nil && app.settings.backendIsConfigured
+    }
+
+    @ViewBuilder
+    private var playbackBar: some View {
+        if canPlay {
+            if player.meetingID == meeting.id {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Button { player.toggle() } label: {
+                            Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(theme.paper)
+                                .frame(width: 22, height: 22)
+                                .background(theme.ink, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(player.isPlaying ? "Pause recording" : "Play recording")
+
+                        Slider(value: Binding(get: { player.currentTime },
+                                              set: { player.seek(to: $0) }),
+                               in: 0...max(player.duration, 1))
+                            .tint(theme.ink)
+                            .controlSize(.mini)
+                            .accessibilityLabel("Recording position")
+
+                        Text(player.timeLabel)
+                            .font(Theme.mono(9))
+                            .monospacedDigit()
+                            .foregroundStyle(theme.inkTertiary)
+                        Button("STOP") { player.stop() }
+                            .buttonStyle(BareButtonStyle())
+                    }
+                    if let error = player.error {
+                        Text(error)
+                            .font(Theme.mono(9.5))
+                            .foregroundStyle(theme.signal)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            } else {
+                HStack(spacing: 8) {
+                    Button("PLAY RECORDING") { app.agent.togglePlayback(meeting) }
+                        .buttonStyle(PanelButtonStyle(compact: true))
+                    Text(meeting.audioFilename != nil ? "ON THIS MAC" : "ON THE VPS")
+                        .font(Theme.mono(9))
+                        .tracking(0.5)
+                        .foregroundStyle(theme.inkTertiary)
+                }
+            }
+        }
     }
 
     // MARK: Section chrome

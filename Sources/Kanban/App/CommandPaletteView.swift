@@ -193,6 +193,8 @@ struct PaletteItem: Identifiable {
                         }),
             PaletteItem(id: "agent", title: "Ask agent", subtitle: "open the agent console",
                         group: "AGENT", shortcut: "⌘⇧A", action: { app.section = .agent }),
+            PaletteItem(id: "calendar", title: "Open Meet", subtitle: "briefs, commitments, memory, automation",
+                        group: "MEET", shortcut: "⌘⌥4", action: { app.openCalendar() }),
             PaletteItem(id: "record", title: "Record meeting", subtitle: "start a new recording",
                         group: "MEETING", shortcut: "⌘R", action: { app.startRecording() }),
             PaletteItem(id: "meetings", title: "Show meetings", subtitle: "recordings and notes",

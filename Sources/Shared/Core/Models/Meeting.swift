@@ -57,6 +57,14 @@ public struct ActionItem: Identifiable, Hashable, Codable, Sendable {
         case dismissed
     }
 
+    /// Execution state, separate from the review decision. Dismissing the suggestion
+    /// and completing the promise are different acts and must not overwrite each other.
+    public enum Commitment: String, Codable, Sendable, Hashable {
+        case open
+        case done
+        case cancelled
+    }
+
     public var id: UUID
     public var meetingID: UUID
     public var title: String
@@ -69,9 +77,21 @@ public struct ActionItem: Identifiable, Hashable, Codable, Sendable {
     public var taskID: UUID?
     public var position: Double
 
+    /// The sentence that made the commitment, so it can be checked against the
+    /// recording rather than trusted as a paraphrase.
+    public var quote: String?
+    public var sourceStart: TimeInterval?
+    public var sourceEnd: TimeInterval?
+    public var commitmentState: Commitment
+    public var completedAt: Date?
+    public var remindedAt: Date?
+
     public init(id: UUID = UUID(), meetingID: UUID, title: String, assignee: String? = nil,
                 dueDate: Date? = nil, confidence: Double = 0, state: State = .suggested,
-                taskID: UUID? = nil, position: Double = 0) {
+                taskID: UUID? = nil, position: Double = 0, quote: String? = nil,
+                sourceStart: TimeInterval? = nil, sourceEnd: TimeInterval? = nil,
+                commitmentState: Commitment = .open, completedAt: Date? = nil,
+                remindedAt: Date? = nil) {
         self.id = id
         self.meetingID = meetingID
         self.title = title
@@ -81,9 +101,30 @@ public struct ActionItem: Identifiable, Hashable, Codable, Sendable {
         self.state = state
         self.taskID = taskID
         self.position = position
+        self.quote = quote
+        self.sourceStart = sourceStart
+        self.sourceEnd = sourceEnd
+        self.commitmentState = commitmentState
+        self.completedAt = completedAt
+        self.remindedAt = remindedAt
     }
 
     public var isSuggested: Bool { state == .suggested }
+    public var isOpen: Bool { commitmentState == .open }
+
+    /// Overdue means the agreed time has passed. Unlike a task, a commitment made
+    /// for 5pm is late at 5:01, not at midnight.
+    public func isOverdue(now: Date = Date()) -> Bool {
+        guard commitmentState == .open, let dueDate else { return false }
+        return dueDate < now
+    }
+
+    /// True when a reminder is due and one has not been sent in the last day.
+    public func needsReminder(now: Date = Date()) -> Bool {
+        guard isOverdue(now: now) else { return false }
+        guard let remindedAt else { return true }
+        return now.timeIntervalSince(remindedAt) >= 24 * 3600
+    }
 }
 
 // MARK: - Transcript

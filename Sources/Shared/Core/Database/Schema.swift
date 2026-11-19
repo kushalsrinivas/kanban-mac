@@ -8,13 +8,15 @@ import Foundation
 /// belongs on the server.
 enum Schema {
 
-    static let version: Int32 = 2
+    static let version: Int32 = 4
 
     static func migrate(_ db: SQLiteDatabase) throws {
         let current = db.userVersion
 
         if current < 1 {
             try createV2(db)
+            try createV3(db)
+            try createV4(db)
             db.userVersion = version
             return
         }
@@ -22,6 +24,16 @@ enum Schema {
         if current < 2 {
             try upgradeV1toV2(db)
             db.userVersion = 2
+        }
+
+        if current < 3 {
+            try createV3(db)
+            db.userVersion = 3
+        }
+
+        if current < 4 {
+            try createV4(db)
+            db.userVersion = 4
         }
 
         // Keep the audit log bounded; this is a personal tool, not an audit system.
@@ -129,6 +141,86 @@ enum Schema {
                 task_id TEXT,
                 detail TEXT NOT NULL DEFAULT ''
             );
+            """)
+    }
+
+    // MARK: v3
+
+    /// Local scheduled meetings. No server counterpart: scheduling is a Mac feature.
+    private static func createV3(_ db: SQLiteDatabase) throws {
+        try db.exec("""
+            CREATE TABLE IF NOT EXISTS scheduled_meetings (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                notes TEXT NOT NULL DEFAULT '',
+                location TEXT NOT NULL DEFAULT '',
+                starts REAL NOT NULL,
+                ends REAL NOT NULL,
+                participants TEXT NOT NULL DEFAULT '[]',
+                meeting_id TEXT,
+                created REAL NOT NULL,
+                updated REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_scheduled_starts ON scheduled_meetings(starts);
+            """)
+    }
+
+    // MARK: v4
+
+    /// Meeting-to-execution and automation. Commitments keep their source sentence
+    /// and execution state; rules are user-editable rows, not code.
+    private static func createV4(_ db: SQLiteDatabase) throws {
+        // A crash between the ALTERs and the version bump must be retryable.
+        var columns: Set<String> = []
+        try db.query("PRAGMA table_info(action_items);") { row in
+            columns.insert(row.string(1))
+        }
+        let additions: [(String, String)] = [
+            ("quote", "TEXT"), ("source_start", "REAL"), ("source_end", "REAL"),
+            ("commitment_state", "TEXT NOT NULL DEFAULT 'open'"),
+            ("completed_at", "REAL"), ("reminded_at", "REAL")
+        ]
+        for (name, type) in additions where !columns.contains(name) {
+            try db.exec("ALTER TABLE action_items ADD COLUMN \(name) \(type);")
+        }
+
+        try db.exec("""
+            CREATE TABLE IF NOT EXISTS automation_rules (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                trigger TEXT NOT NULL DEFAULT 'meeting.completed',
+                conditions TEXT NOT NULL DEFAULT '{}',
+                actions TEXT NOT NULL DEFAULT '[]',
+                created REAL NOT NULL,
+                last_run REAL
+            );
+
+            CREATE TABLE IF NOT EXISTS automation_runs (
+                id TEXT PRIMARY KEY,
+                rule_id TEXT,
+                rule_name TEXT NOT NULL,
+                meeting_id TEXT,
+                status TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT '',
+                started REAL NOT NULL,
+                finished REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_automation_runs_meeting ON automation_runs(meeting_id);
+
+            CREATE TABLE IF NOT EXISTS local_messages (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                recipients TEXT NOT NULL DEFAULT '[]',
+                subject TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT '',
+                meeting_id TEXT,
+                commitment_id TEXT,
+                created REAL NOT NULL,
+                sent REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_local_messages_meeting ON local_messages(meeting_id);
             """)
     }
 

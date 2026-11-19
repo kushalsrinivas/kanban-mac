@@ -59,9 +59,132 @@ enum ScreenshotDriver {
             await pause()
             await capture("06-meeting-detail-light")
 
+            app.section = .calendar
+            app.selectedScheduledMeetingID = app.store.scheduledMeetings.upcoming().first?.id
+            await pause()
+            await capture("08-meet-briefs-light")
+            app.meetTab = .commitments
+            await pause()
+            await capture("09-meet-commitments-light")
+            app.meetTab = .memory
+            await pause()
+            await capture("10-meet-memory-light")
+            app.meetTab = .automation
+            await pause()
+            await capture("11-meet-automation-light")
+            app.meetTab = .briefs
+
             app.section = .agent
             await pause()
             await capture("07-agent-light")
+
+            // Drive the workspace through the same prompts a person would use, so
+            // the evidence includes real artifacts rather than an empty panel.
+            app.agent.send("What's on my todo?")
+            await pause()
+            await capture("20-agent-tasks-light")
+
+            app.agent.send("Show my recent meetings")
+            await pause()
+            await capture("21-agent-meetings-light")
+
+            app.agent.send("Summarize it")
+            await pause()
+            await capture("22-agent-summary-light")
+
+            app.agent.send("who was in it?")
+            await pause()
+            await capture("23-agent-participants-light")
+
+            app.agent.send("show the transcript of product sync")
+            await pause()
+            await capture("24-agent-transcript-light")
+
+            app.agent.send("What tasks came out of it?")
+            await pause()
+            await capture("25-agent-action-items-light")
+
+            app.agent.send("Find my last recording")
+            await pause()
+            await capture("26-agent-recording-light")
+
+            app.agent.send("Play its recording")
+            await pause()
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            await capture("27-agent-playing-light")
+            app.agent.player.pause()
+
+            app.agent.send("open the design review meeting")
+            await pause()
+            await capture("28-agent-opened-meeting-light")
+            app.section = .agent
+            await pause()
+
+            app.agent.send("create task Review agent output @tomorrow !high #agent >todo")
+            await pause()
+            await capture("29-agent-proposal-light")
+
+            if let window = mainWindow() {
+                window.setContentSize(NSSize(width: 780, height: 600))
+                await pause()
+                await capture("30-agent-compact-light")
+                window.setContentSize(NSSize(width: 1160, height: 760))
+                await pause()
+            }
+
+            if let action = app.agent.pending.first {
+                await app.agent.execute(action)
+            }
+            await pause()
+            await capture("31-agent-executed-light")
+
+            app.agent.send("What's on my todo?")
+            await pause()
+            await capture("32-agent-after-execute-light")
+
+            app.settings.appearance = .dark
+            await pause()
+            await capture("33-agent-dark")
+            app.settings.appearance = .light
+            await pause()
+
+            // Local schedule: list, brief, proposal, confirmation, result.
+            app.section = .calendar
+            app.selectedScheduledMeetingID = app.store.scheduledMeetings.upcoming().first?.id
+            await pause()
+            await capture("34-calendar-light")
+
+            app.section = .agent
+            app.agent.send("what's on my calendar?")
+            await pause()
+            await capture("35-agent-calendar-light")
+
+            app.agent.send("prepare me for my next meeting")
+            await pause()
+            await capture("36-agent-brief-light")
+
+            app.agent.send("schedule a meeting about onboarding with Sarah tomorrow at 2pm for 45 minutes")
+            await pause()
+            await capture("37-agent-schedule-proposal-light")
+            if let action = app.agent.pending.first {
+                await app.agent.execute(action)
+            }
+            await pause()
+            await capture("38-agent-scheduled-light")
+
+            if let created = app.store.scheduledMeetings.first(where: { $0.title == "Onboarding" }) {
+                app.openCalendar(created.id)
+            } else {
+                app.openCalendar()
+            }
+            await pause()
+            await capture("39-calendar-scheduled-light")
+
+            app.settings.appearance = .dark
+            await pause()
+            await capture("40-calendar-dark")
+            app.settings.appearance = .light
+            await pause()
 
             app.section = .tasks
             await pause()

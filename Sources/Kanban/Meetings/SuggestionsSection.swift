@@ -89,7 +89,16 @@ private struct SuggestionCard: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            if item.assignee != nil || item.dueDate != nil || item.confidence > 0 {
+            if let quote = item.quote {
+                Text("\"\(quote)\"")
+                    .font(Theme.mono(9))
+                    .foregroundStyle(theme.inkTertiary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if item.assignee != nil || item.dueDate != nil || item.confidence > 0
+                || item.sourceStart != nil {
                 HStack(spacing: 6) {
                     if let assignee = item.assignee, !assignee.isEmpty {
                         MicroLabel("assigned")
@@ -102,6 +111,13 @@ private struct SuggestionCard: View {
                         Text(DateInput.shortLabel(due))
                             .font(Theme.mono(9.5))
                             .foregroundStyle(theme.inkSecondary)
+                    }
+                    if let start = item.sourceStart {
+                        Text("·").font(Theme.mono(9)).foregroundStyle(theme.line)
+                        Text(Meeting.timecode(start))
+                            .font(Theme.mono(9.5))
+                            .monospacedDigit()
+                            .foregroundStyle(theme.inkTertiary)
                     }
                     Spacer(minLength: 0)
                     if item.confidence > 0 {

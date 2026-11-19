@@ -93,6 +93,11 @@ targets:
       - path: Sources/Kanban/Core/Authentication/KeychainStore.swift
       - path: Sources/Kanban/Core/AI/GeminiClient.swift
       - path: Sources/Kanban/Core/AI/LocalAgentPlan.swift
+      - path: Sources/Kanban/Core/Networking/APIClient.swift
+      - path: Sources/Kanban/Core/Networking/SyncEngine.swift
+      - path: Sources/Kanban/Agent/AgentModelProvider.swift
+      - path: Sources/Kanban/Agent/AgentSession.swift
+      - path: Sources/Kanban/Agent/RecordingPlayer.swift
       - path: Sources/Kanban/Core/Transcription
       - path: Sources/Kanban/Dictation/DictationSilenceDetector.swift
       - path: Resources/Kanban/catalog.json
@@ -106,6 +111,20 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.kanban.tests
         GENERATE_INFOPLIST_FILE: YES
+
+  MeetMCP:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/Shared/Core
+      - path: Sources/Shared/Snapshot
+      - path: Sources/Shared/Meetings
+      - path: Sources/MeetingsMCP
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kanban.mcp
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGNING_ALLOWED: NO
 
 schemes:
   Kanban:
@@ -129,3 +148,9 @@ schemes:
       config: Debug
       targets:
         - KanbanTests
+  MeetMCP:
+    build:
+      targets:
+        MeetMCP: all
+    run:
+      config: Debug

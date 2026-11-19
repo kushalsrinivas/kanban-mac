@@ -223,4 +223,16 @@ final class AppSettings {
     func applyActivationPolicy() {
         NSApplication.shared.setActivationPolicy(showInDock ? .regular : .accessory)
     }
+
+    #if DEBUG
+    /// Unit tests and capture harnesses: credentials stay in memory, never in the
+    /// login keychain, and no real server is configured.
+    static func testing(geminiKey: String = "test-key") -> AppSettings {
+        let settings = AppSettings()
+        settings.serverURL = ""
+        settings.loadedAPIKey = ""
+        settings.loadedGeminiKey = geminiKey
+        return settings
+    }
+    #endif
 }

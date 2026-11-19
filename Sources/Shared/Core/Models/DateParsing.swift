@@ -37,9 +37,17 @@ public enum DateInput {
         if let d = isoPlain.date(from: raw) { return d }
         // DateFormatter is lenient about separators: without this shape check,
         // "18 sep 27" parses as year 18. Only accept the literal ISO date form.
-        if s.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil,
-           let d = isoDateOnly.date(from: s) {
-            return endOfDay(d, calendar)
+        // Build the formatter with the caller's calendar: the static one uses the
+        // system timezone, which moved a UTC date across midnight in another zone.
+        if s.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy-MM-dd"
+            formatter.calendar = calendar
+            formatter.timeZone = calendar.timeZone
+            if let d = formatter.date(from: s) {
+                return endOfDay(d, calendar)
+            }
         }
 
         // Epoch seconds

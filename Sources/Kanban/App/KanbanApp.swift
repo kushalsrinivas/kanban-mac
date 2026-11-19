@@ -73,6 +73,8 @@ struct KanbanCommands: Commands {
                 .keyboardShortcut("2", modifiers: [.command, .option])
             Button("Agent") { app.section = .agent }
                 .keyboardShortcut("3", modifiers: [.command, .option])
+            Button("Meet") { app.section = .calendar }
+                .keyboardShortcut("4", modifiers: [.command, .option])
             Divider()
             Button("Sync Now") { Task { await app.connect() } }
                 .keyboardShortcut("r", modifiers: [.command, .shift])

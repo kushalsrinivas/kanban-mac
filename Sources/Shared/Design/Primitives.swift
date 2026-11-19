@@ -256,7 +256,7 @@ public struct StatusDot: View {
 
 // MARK: - Priority mark
 
-/// Priority as a filled-bar glyph rather than a colour chip — keeps the board monochrome.
+/// Priority as a filled-bar glyph rather than a colour chip; the card fill carries the tint.
 public struct PriorityMark: View {
     @Environment(\.theme) private var theme
     private let priority: Priority

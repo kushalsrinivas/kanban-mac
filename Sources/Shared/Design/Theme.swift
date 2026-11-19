@@ -60,6 +60,16 @@ public struct Theme: Sendable, Equatable {
         return t
     }
 
+    /// Card fill by priority: a quiet temperature ramp from neutral to rust.
+    public func priorityFill(_ priority: Priority) -> Color {
+        switch priority {
+        case .low: return panel
+        case .medium: return isDark ? Color(hex: 0x23261A) : Color(hex: 0xE8EAD9)
+        case .high: return isDark ? Color(hex: 0x2E2718) : Color(hex: 0xEDDFC0)
+        case .urgent: return isDark ? Color(hex: 0x35221D) : Color(hex: 0xEAD0C7)
+        }
+    }
+
     // MARK: Metrics
 
     public enum Radius {
