@@ -268,6 +268,10 @@ public enum AgentPlanner {
         // into multiple validated create_task actions; short commands stay local.
         if isComplexWriteRequest(text) { return .askModel(raw) }
         if let intent = writeIntent(raw, context: context, now: now) { return intent }
+        // "add some sample todo items please" is an imperative with a quantifier,
+        // not the read query "what's on my todo". If the deterministic patterns did
+        // not claim it, the model decides — it can invent the sample items.
+        if isWriteRequest(text) { return .askModel(raw) }
 
         if isMeetingList(text) {
             return .meetingList(meetingFilter(text, context: context))
@@ -473,6 +477,17 @@ public enum AgentPlanner {
 
     /// A multi-clause instruction deserves the model. The threshold keeps ordinary
     /// one-line commands deterministic while a brain dump goes to Gemini.
+    /// Imperative openers that can only mean a mutation. The deterministic parser
+    /// always gets first refusal; this is the safety net that keeps a write phrase
+    /// from falling through into a read like "the TODO column is empty".
+    private static func isWriteRequest(_ text: String) -> Bool {
+        let openers = ["add ", "create ", "make ", "remind ", "note to self",
+                       "put ", "delete ", "remove ", "archive ", "complete ",
+                       "finish ", "rename ", "set ", "move ", "tag ", "label ",
+                       "update ", "edit "]
+        return openers.contains { text.hasPrefix($0) }
+    }
+
     private static func isComplexWriteRequest(_ text: String) -> Bool {
         let words = text.split(whereSeparator: { $0 == " " }).count
         guard words >= 16 else { return false }

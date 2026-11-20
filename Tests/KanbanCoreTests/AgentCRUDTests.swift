@@ -73,6 +73,14 @@ final class AgentCRUDTests: XCTestCase {
         XCTAssertNil(possessive.due, "a possessive is not a due date")
     }
 
+    func testQuantifiedAddIsAWriteNotATaskList() {
+        var context = AgentContext()
+        guard case .askModel = AgentPlanner.plan("add some sample todo items please",
+                                                 context: context) else {
+            return XCTFail("a quantified add must be handled by the model, not a TODO list read")
+        }
+    }
+
     func testLongBrainDumpGoesToTheModelAndCreatesEveryTask() async throws {
         let prompt = "add these todo basically i need to work on few stuff one is courses folio website completion and setting it up secondly newstok ai processing to be moved to the phone and then cleriko app submission and then introduction of haven to the desktop world aswell"
         var context = AgentContext()

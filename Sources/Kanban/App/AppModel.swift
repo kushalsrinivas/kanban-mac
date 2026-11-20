@@ -293,6 +293,7 @@ final class AppModel {
         mail.start()
         #if DEBUG
         ScreenshotDriver.runIfRequested(self)
+        AgentDiagnostics.runIfRequested(self)
         #endif
         Task {
             // With a Gemini key the pipeline is local; retry anything left ready
