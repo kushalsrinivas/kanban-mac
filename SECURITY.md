@@ -19,6 +19,22 @@ was still present in the working tree when this note was written.
 An agent cannot perform these rotations; they need access to the provider
 consoles and the running database.
 
+## Keychain access and authentication prompts
+
+All Keychain reads are serialized by `Sources/Shared/Core/Authentication/KeychainAccess.swift`.
+The manager keeps successful values for the process session, caches misses for a few
+seconds, and reuses one `LAContext` in `SystemKeychainBackend`. Concurrent callers for
+the same item wait for the first read; they do not open parallel authentication
+dialogs. Writes update the cache and explicit invalidation clears it.
+
+This fixes the repeated prompts caused by AppSettings, the Gmail token manager,
+GmailCrypto and MailModel each calling `SecItemCopyMatching` for the same credential.
+It does not remove any security requirement: items remain
+`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, no access-control requirement is
+weakened, and a cancelled or failed authentication is not retried in a loop. An
+ad-hoc-signed development build can still prompt once per rebuilt binary because the
+item ACL names that binary; that is a code-signing identity issue, not an access bug.
+
 ## Gmail credentials
 
 Gmail OAuth tokens are stored as generic-password items in the login Keychain under

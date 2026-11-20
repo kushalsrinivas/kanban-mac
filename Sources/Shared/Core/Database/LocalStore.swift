@@ -104,9 +104,12 @@ public final class LocalStore {
     @discardableResult
     public func createTask(_ task: TaskItem) -> TaskItem {
         var new = task
+        let now = Date()
         if new.position == 0 { new.position = nextPosition(in: new.status) }
-        new.updatedAt = Date()
-        if new.status == .done && new.completedAt == nil { new.completedAt = Date() }
+        new.updatedAt = now
+        new.lastStatusUpdatedAt = new.lastStatusUpdatedAt ?? now
+        new.lastActivityAt = new.lastActivityAt ?? now
+        if new.status == .done && new.completedAt == nil { new.completedAt = now }
         tasks.append(new)
         write { try Self.insertTask(new, into: $0) }
         didMutate()
@@ -120,8 +123,17 @@ public final class LocalStore {
         var task = before
         edit(&task)
         guard task != before else { return before }
-        task.updatedAt = Date()
-        if task.status == .done, task.completedAt == nil { task.completedAt = task.updatedAt }
+        let now = Date()
+        let statusChanged = task.status != before.status
+        let progressed = Self.isMeaningfulChange(from: before, to: task)
+        task.updatedAt = now
+        if statusChanged {
+            task.lastStatusUpdatedAt = now
+            task.lastActivityAt = now
+        } else if progressed {
+            task.lastActivityAt = now
+        }
+        if task.status == .done, task.completedAt == nil { task.completedAt = now }
         if task.status != .done { task.completedAt = nil }
         tasks[index] = task
         write { try Self.updateTask(task, in: $0) }
@@ -182,7 +194,32 @@ public final class LocalStore {
     public func replaceTasks(with remote: [TaskItem]) {
         let pending = Set(pendingEntityIDs())
         let kept = tasks.filter { pending.contains($0.id) }
+        let localByID = Dictionary(tasks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var merged = remote.filter { !pending.contains($0.id) }
+        // A server refresh carries no inactivity history. Keep the local anchors,
+        // otherwise every sync would make the whole board look freshly touched.
+        for index in merged.indices {
+            guard let local = localByID[merged[index].id] else { continue }
+            let serverMoved = merged[index].status != local.status
+            let serverTouched = serverMoved
+                || merged[index].title != local.title
+                || merged[index].notes != local.notes
+                || merged[index].priority != local.priority
+                || merged[index].dueDate != local.dueDate
+                || merged[index].tags != local.tags
+            if serverTouched {
+                let now = Date()
+                merged[index].lastActivityAt = now
+                if serverMoved { merged[index].lastStatusUpdatedAt = now }
+            } else {
+                merged[index].lastStatusUpdatedAt = merged[index].lastStatusUpdatedAt
+                    ?? local.lastStatusUpdatedAt
+                merged[index].lastActivityAt = merged[index].lastActivityAt
+                    ?? local.lastActivityAt
+            }
+            merged[index].lastStaleNoticeAt = merged[index].lastStaleNoticeAt
+                ?? local.lastStaleNoticeAt
+        }
         merged.append(contentsOf: kept)
         tasks = merged
         write { db in
@@ -193,6 +230,25 @@ public final class LocalStore {
             }
         }
         didMutate()
+    }
+
+    /// Records that a stale nudge was scheduled. This is not progress, so it must
+    /// not reset `lastActivityAt`.
+    @discardableResult
+    public func markStaleNotified(_ id: UUID, at date: Date = Date()) -> TaskItem? {
+        updateTask(id) { $0.lastStaleNoticeAt = date }
+    }
+
+    private static func isMeaningfulChange(from before: TaskItem, to after: TaskItem) -> Bool {
+        before.title != after.title
+            || before.notes != after.notes
+            || before.status != after.status
+            || before.priority != after.priority
+            || before.dueDate != after.dueDate
+            || before.tags != after.tags
+            || before.subtasks != after.subtasks
+            || before.archivedAt != after.archivedAt
+            || before.source != after.source
     }
 
     // MARK: - Subtasks
@@ -705,7 +761,8 @@ public final class LocalStore {
 
     private static let taskColumns = """
         id, remote_id, title, notes, status, priority, due, tags, position,
-        created, updated, completed, archived, source, meeting_id, action_item_id
+        created, updated, completed, archived, source, meeting_id, action_item_id,
+        last_status_updated, last_activity, last_stale_notice
         """
 
     private static func loadTasks(from db: SQLiteDatabase) throws -> [TaskItem] {
@@ -734,6 +791,9 @@ public final class LocalStore {
                 updatedAt: Date(timeIntervalSince1970: row.double(10)),
                 completedAt: row.doubleOrNil(11).map(Date.init(timeIntervalSince1970:)),
                 archivedAt: row.doubleOrNil(12).map(Date.init(timeIntervalSince1970:)),
+                lastStatusUpdatedAt: row.doubleOrNil(16).map(Date.init(timeIntervalSince1970:)),
+                lastActivityAt: row.doubleOrNil(17).map(Date.init(timeIntervalSince1970:)),
+                lastStaleNoticeAt: row.doubleOrNil(18).map(Date.init(timeIntervalSince1970:)),
                 source: TaskSource(rawValue: row.string(13)) ?? .manual,
                 meetingID: row.stringOrNil(14).flatMap(UUID.init(uuidString:)),
                 actionItemID: row.stringOrNil(15).flatMap(UUID.init(uuidString:))
@@ -749,12 +809,13 @@ public final class LocalStore {
          .double(t.updatedAt.timeIntervalSince1970), .date(t.completedAt), .date(t.archivedAt),
          .text(t.source.rawValue),
          t.meetingID.map { .text($0.uuidString) } ?? .null,
-         t.actionItemID.map { .text($0.uuidString) } ?? .null]
+         t.actionItemID.map { .text($0.uuidString) } ?? .null,
+         .date(t.lastStatusUpdatedAt), .date(t.lastActivityAt), .date(t.lastStaleNoticeAt)]
     }
 
     private static func insertTask(_ t: TaskItem, into db: SQLiteDatabase) throws {
         try db.transaction {
-            try db.run("INSERT OR REPLACE INTO tasks (\(taskColumns)) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);",
+            try db.run("INSERT OR REPLACE INTO tasks (\(taskColumns)) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);",
                        taskBinds(t))
             try writeSubtasks(t, db)
         }
@@ -765,7 +826,8 @@ public final class LocalStore {
             try db.run("""
                 UPDATE tasks SET title=?, notes=?, status=?, priority=?, due=?, tags=?, position=?,
                                  created=?, updated=?, completed=?, archived=?, source=?,
-                                 meeting_id=?, action_item_id=? WHERE id=?;
+                                 meeting_id=?, action_item_id=?, last_status_updated=?,
+                                 last_activity=?, last_stale_notice=? WHERE id=?;
                 """,
                 Array(taskBinds(t).dropFirst(2)) + [.text(t.id.uuidString)])
             try writeSubtasks(t, db)

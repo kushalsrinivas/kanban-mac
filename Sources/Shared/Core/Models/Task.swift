@@ -124,6 +124,15 @@ public struct TaskItem: Identifiable, Hashable, Codable, Sendable {
     public var updatedAt: Date
     public var completedAt: Date?
     public var archivedAt: Date?
+    /// When the task last moved between columns. Distinct from `updatedAt`, which
+    /// also moves for a reorder or a note edit.
+    public var lastStatusUpdatedAt: Date?
+    /// The last change that counts as meaningful progress. Reordering a card does
+    /// not reset this; editing it, completing a subtask or moving it does.
+    public var lastActivityAt: Date?
+    /// When a stale-task nudge was last scheduled. Persisted so a relaunch cannot
+    /// notify about the same unchanged task again.
+    public var lastStaleNoticeAt: Date?
 
     // Provenance
     public var source: TaskSource
@@ -146,6 +155,9 @@ public struct TaskItem: Identifiable, Hashable, Codable, Sendable {
         updatedAt: Date = Date(),
         completedAt: Date? = nil,
         archivedAt: Date? = nil,
+        lastStatusUpdatedAt: Date? = nil,
+        lastActivityAt: Date? = nil,
+        lastStaleNoticeAt: Date? = nil,
         source: TaskSource = .manual,
         meetingID: UUID? = nil,
         actionItemID: UUID? = nil
@@ -163,9 +175,21 @@ public struct TaskItem: Identifiable, Hashable, Codable, Sendable {
         self.updatedAt = updatedAt
         self.completedAt = completedAt
         self.archivedAt = archivedAt
+        self.lastStatusUpdatedAt = lastStatusUpdatedAt
+        self.lastActivityAt = lastActivityAt
+        self.lastStaleNoticeAt = lastStaleNoticeAt
         self.source = source
         self.meetingID = meetingID
         self.actionItemID = actionItemID
+    }
+
+    /// The last moment this task actually moved forward. Older rows backfilled by
+    /// the v6 migration use `updatedAt`, so they remain classifiable immediately.
+    public var activityAnchor: Date { lastActivityAt ?? updatedAt }
+    public var statusAnchor: Date { lastStatusUpdatedAt ?? updatedAt }
+
+    public func inactivity(now: Date = Date()) -> TimeInterval {
+        max(0, now.timeIntervalSince(activityAnchor))
     }
 
     public var isArchived: Bool { archivedAt != nil }

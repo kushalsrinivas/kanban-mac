@@ -43,6 +43,16 @@ final class AppSettings {
     var notificationsEnabled: Bool { didSet { set(notificationsEnabled, "notificationsEnabled") } }
     var notifyOnAgentAction: Bool { didSet { set(notifyOnAgentAction, "notifyOnAgentAction") } }
     var notifyOnMeetingProcessed: Bool { didSet { set(notifyOnMeetingProcessed, "notifyOnMeetingProcessed") } }
+    var staleTaskNudges: Bool { didSet { set(staleTaskNudges, "staleTaskNudges") } }
+    var staleUrgentHours: Int { didSet { set(staleUrgentHours, "staleUrgentHours") } }
+    var staleHighHours: Int { didSet { set(staleHighHours, "staleHighHours") } }
+    var staleMediumHours: Int { didSet { set(staleMediumHours, "staleMediumHours") } }
+    var staleLowHours: Int { didSet { set(staleLowHours, "staleLowHours") } }
+    var staleQuietHoursEnabled: Bool { didSet { set(staleQuietHoursEnabled, "staleQuietHoursEnabled") } }
+    var staleQuietStartHour: Int { didSet { set(staleQuietStartHour, "staleQuietStartHour") } }
+    var staleQuietEndHour: Int { didSet { set(staleQuietEndHour, "staleQuietEndHour") } }
+    var staleMaxPerDay: Int { didSet { set(staleMaxPerDay, "staleMaxPerDay") } }
+    var staleCooldownHours: Int { didSet { set(staleCooldownHours, "staleCooldownHours") } }
 
     // Backend
     var serverURL: String { didSet { set(serverURL, "serverURL") } }
@@ -174,6 +184,22 @@ final class AppSettings {
         GmailOAuthConfig(clientID: gmailClientID).isValid
     }
 
+    /// The pure policy the notification bridge evaluates. Settings only supplies
+    /// values; the engine owns the threshold and quiet-hours rules.
+    var staleTaskPolicy: StaleTaskPolicy {
+        StaleTaskPolicy(
+            enabled: staleTaskNudges,
+            urgentHours: Double(max(1, staleUrgentHours)),
+            highHours: Double(max(1, staleHighHours)),
+            mediumHours: Double(max(1, staleMediumHours)),
+            lowHours: Double(max(1, staleLowHours)),
+            quietHoursEnabled: staleQuietHoursEnabled,
+            quietStartHour: staleQuietStartHour,
+            quietEndHour: staleQuietEndHour,
+            cooldownHours: Double(max(1, staleCooldownHours)),
+            maxPerDay: max(1, staleMaxPerDay))
+    }
+
     /// True when meeting analysis and the local agent can run.
     var hasGeminiKey: Bool {
         !geminiAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -225,6 +251,16 @@ final class AppSettings {
         notificationsEnabled = bool("notificationsEnabled", false)
         notifyOnAgentAction = bool("notifyOnAgentAction", false)
         notifyOnMeetingProcessed = bool("notifyOnMeetingProcessed", true)
+        staleTaskNudges = bool("staleTaskNudges", true)
+        staleUrgentHours = int("staleUrgentHours", 4)
+        staleHighHours = int("staleHighHours", 24)
+        staleMediumHours = int("staleMediumHours", 72)
+        staleLowHours = int("staleLowHours", 168)
+        staleQuietHoursEnabled = bool("staleQuietHoursEnabled", true)
+        staleQuietStartHour = int("staleQuietStartHour", 22)
+        staleQuietEndHour = int("staleQuietEndHour", 8)
+        staleMaxPerDay = int("staleMaxPerDay", 2)
+        staleCooldownHours = int("staleCooldownHours", 12)
         serverURL = string("serverURL", "")
         requestTimeout = double("requestTimeout", 20)
         confirmDestructiveAgentActions = bool("confirmDestructive", true)

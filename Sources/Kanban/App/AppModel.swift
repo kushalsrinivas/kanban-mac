@@ -185,6 +185,14 @@ final class AppModel {
         self.mail = mail
 
         self.agent = AgentSession(store: store, client: client, settings: settings, sync: sync)
+        notifications.onOpenTask = { [weak self] id in
+            guard let self else { return }
+            guard self.store.task(id) != nil else {
+                self.flash("TASK NOT FOUND")
+                return
+            }
+            self.openInspector(for: id)
+        }
         mail.onThreadSelected = { [weak self] accountID, threadID in
             self?.agent.focusEmail(accountID: accountID, threadID: threadID)
         }
@@ -217,6 +225,7 @@ final class AppModel {
                     meeting.actionItems.map { (item: $0, meeting: meeting) }
                 },
                 enabled: self.settings.notificationsEnabled)
+            self.scheduleStaleNotifications()
         }
         processor.onCompleted = { [weak self] meeting in
             guard let self else { return }
@@ -303,12 +312,17 @@ final class AppModel {
             await recorder.probe()
             if calendar.isAuthorized { await refreshCalendar() }
             sweepCommitments()
+            scheduleStaleNotifications()
         }
         if settings.notificationsEnabled {
             notifications.requestAuthorisation { [weak self] granted in
                 guard let self else { return }
-                if granted { self.notifications.reschedule(for: self.store.tasks, enabled: true) }
-                else { self.settings.notificationsEnabled = false }
+                if granted {
+                    self.notifications.reschedule(for: self.store.tasks, enabled: true)
+                    self.scheduleStaleNotifications()
+                } else {
+                    self.settings.notificationsEnabled = false
+                }
             }
         }
     }
@@ -330,6 +344,7 @@ final class AppModel {
         Task {
             if calendar.isAuthorized { await refreshCalendar() }
             sweepCommitments()
+            scheduleStaleNotifications()
             await mail.syncIfStale()
         }
         guard settings.backendIsConfigured else { return }
@@ -366,11 +381,20 @@ final class AppModel {
                 guard let self else { return }
                 self.settings.notificationsEnabled = granted
                 self.notifications.reschedule(for: self.store.tasks, enabled: granted)
+                self.scheduleStaleNotifications()
                 if !granted { self.flash("NOTIFICATIONS DENIED IN SYSTEM SETTINGS") }
             }
         } else {
             notifications.reschedule(for: [], enabled: false)
+            notifications.rescheduleCommitments([], enabled: false)
+            notifications.rescheduleStale(tasks: [], policy: settings.staleTaskPolicy,
+                                          enabled: false) { _, _ in }
         }
+    }
+
+    /// Called when a stale-task preference changes, and on Settings close.
+    func refreshStaleNotifications() {
+        scheduleStaleNotifications()
     }
 
     // MARK: Board queries
@@ -1157,6 +1181,18 @@ final class AppModel {
             if !segments.isEmpty { out[meeting.id] = segments }
         }
         return out
+    }
+
+    /// Stale nudges use the same store-change coalescing as due reminders. The
+    /// bridge keeps an unchanged task's pending request and never queues a second
+    /// one; marking the notice is not task progress, so it does not reset the clock.
+    func scheduleStaleNotifications() {
+        notifications.rescheduleStale(
+            tasks: store.tasks,
+            policy: settings.staleTaskPolicy,
+            enabled: settings.notificationsEnabled && settings.staleTaskNudges) { [weak self] id, at in
+                self?.store.markStaleNotified(id, at: at)
+            }
     }
 
     // MARK: Deleting

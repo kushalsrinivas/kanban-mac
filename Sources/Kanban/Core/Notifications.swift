@@ -6,7 +6,7 @@ import UserNotifications
 /// Everything is scheduled ahead of time with calendar triggers, so the app runs no
 /// timers and does no background work — the notification daemon does the waiting.
 @MainActor
-final class NotificationCenterBridge {
+final class NotificationCenterBridge: NSObject, UNUserNotificationCenterDelegate {
 
     private let center = UNUserNotificationCenter.current()
     private var scheduledSignature: Int = 0
@@ -15,6 +15,23 @@ final class NotificationCenterBridge {
     private var taskIDs: [String] = []
     private var commitmentIDs: [String] = []
     private var briefIDs: [String] = []
+    private var staleIDs: [String] = []
+    private var staleGeneration = 0
+    /// A notification tap can arrive before the window has wired its handler.
+    private var pendingOpenTaskID: UUID?
+
+    var onOpenTask: ((UUID) -> Void)? {
+        didSet {
+            guard let id = pendingOpenTaskID else { return }
+            pendingOpenTaskID = nil
+            onOpenTask?(id)
+        }
+    }
+
+    override init() {
+        super.init()
+        center.delegate = self
+    }
 
     func requestAuthorisation(_ completion: @escaping (Bool) -> Void) {
         center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
@@ -114,6 +131,125 @@ final class NotificationCenterBridge {
             center.add(UNNotificationRequest(identifier: identifier,
                                              content: content, trigger: trigger))
         }
+    }
+
+    /// Schedules the next stale-task nudges. The engine includes future thresholds;
+    /// the system keeps the request after the app quits, so an untouched task can
+    /// still raise its hand hours later. Existing requests are kept when the task is
+    /// unchanged, which is what prevents a store update from re-notifying it.
+    func rescheduleStale(tasks: [TaskItem], policy: StaleTaskPolicy, enabled: Bool,
+                         onScheduled: @escaping (UUID, Date) -> Void) {
+        staleGeneration += 1
+        let generation = staleGeneration
+        guard enabled else {
+            // Pending requests survive relaunches and are not in `staleIDs` until
+            // this process has seen them. Remove by prefix, not by memory.
+            Task { @MainActor in
+                let pending = await center.pendingNotificationRequests()
+                guard generation == self.staleGeneration else { return }
+                let stale = pending.map(\.identifier).filter { $0.hasPrefix("stale-") }
+                center.removePendingNotificationRequests(withIdentifiers: stale)
+                self.staleIDs.removeAll()
+            }
+            return
+        }
+
+        Task { @MainActor in
+            let authorization = await center.notificationSettings().authorizationStatus
+            guard authorization == .authorized || authorization == .provisional else { return }
+            let pending = await center.pendingNotificationRequests()
+            guard generation == self.staleGeneration else { return }
+            let existing = Set(pending.map(\.identifier).filter { $0.hasPrefix("stale-") })
+            let now = Date()
+            let candidates = StaleTaskEngine.candidates(tasks: tasks, now: now, policy: policy)
+            let noticesToday = tasks.filter {
+                guard let notice = $0.lastStaleNoticeAt else { return false }
+                return now.timeIntervalSince(notice) < 86_400
+            }.count
+            var budget = max(0, policy.maxPerDay - noticesToday)
+            var keep: Set<String> = []
+            var lastFire: Date?
+
+            for candidate in candidates {
+                let identifier = "stale-\(candidate.task.id.uuidString)"
+                if let notice = candidate.task.lastStaleNoticeAt,
+                   notice >= candidate.task.activityAnchor {
+                    // Already scheduled or already delivered. Keep a pending request;
+                    // never enqueue a second one for the same unchanged task.
+                    if existing.contains(identifier) { keep.insert(identifier) }
+                    continue
+                }
+                guard budget > 0, keep.count < policy.maxScheduled else { continue }
+
+                var fireAt = max(candidate.fireAt, now.addingTimeInterval(60))
+                if let lastFire {
+                    fireAt = max(fireAt, lastFire.addingTimeInterval(
+                        TimeInterval(max(0, policy.minimumSpacingMinutes)) * 60))
+                }
+                fireAt = policy.nextAllowed(fireAt, now: now)
+
+                let content = UNMutableNotificationContent()
+                content.title = candidate.task.title
+                content.subtitle = "\(candidate.task.status.label) · \(candidate.task.priority.longLabel)"
+                content.body = candidate.reason
+                content.userInfo = ["taskID": candidate.task.id.uuidString]
+                content.threadIdentifier = "kanban.stale"
+                content.sound = candidate.task.priority >= .high ? .default : nil
+
+                let components = Calendar.current.dateComponents(
+                    [.year, .month, .day, .hour, .minute], from: fireAt)
+                let request = UNNotificationRequest(
+                    identifier: identifier, content: content,
+                    trigger: UNCalendarNotificationTrigger(dateMatching: components,
+                                                          repeats: false))
+                do {
+                    try await center.add(request)
+                    keep.insert(identifier)
+                    lastFire = fireAt
+                    budget -= 1
+                    onScheduled(candidate.task.id, now)
+                } catch {
+                    // Permission or system refusal: leave it out; the next deliberate
+                    // reschedule will try again.
+                    continue
+                }
+            }
+
+            let remove = existing.subtracting(keep)
+            if !remove.isEmpty {
+                center.removePendingNotificationRequests(withIdentifiers: Array(remove))
+            }
+            self.staleIDs = Array(keep)
+        }
+    }
+
+    // MARK: - Notification taps
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let raw = response.notification.request.content.userInfo["taskID"] as? String
+        if let raw, let id = UUID(uuidString: raw) {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let handler = self.onOpenTask {
+                    handler(id)
+                } else {
+                    self.pendingOpenTaskID = id
+                }
+            }
+        }
+        completionHandler()
     }
 
     /// Meeting processing finishes minutes after the user walked away, so this is one

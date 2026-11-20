@@ -53,6 +53,9 @@ struct SettingsView: View {
         .background(theme.paper)
         .environment(\.theme, app.theme)
         .preferredColorScheme(app.settings.colorScheme)
+        .onChange(of: app.settings.staleTaskPolicy) { _, _ in
+            app.refreshStaleNotifications()
+        }
         .onAppear {
             recordingsBytes = KanbanPaths.recordingsByteCount()
             apiKeyDraft = app.settings.apiKey
@@ -671,6 +674,34 @@ struct SettingsView: View {
         }
     }
 
+    private func thresholdStepper(_ label: String, value: Binding<Int>,
+                                  range: ClosedRange<Int>) -> some View {
+        HStack(spacing: 3) {
+            Text(label)
+                .font(Theme.mono(8.5))
+                .foregroundStyle(theme.inkTertiary)
+            Stepper(value: value, in: range) { EmptyView() }
+                .labelsHidden()
+                .controlSize(.mini)
+            Text("\(value.wrappedValue)h")
+                .font(Theme.mono(9))
+                .monospacedDigit()
+                .foregroundStyle(theme.inkSecondary)
+        }
+    }
+
+    private func hourStepper(_ value: Binding<Int>) -> some View {
+        HStack(spacing: 3) {
+            Stepper(value: value, in: 0...23) { EmptyView() }
+                .labelsHidden()
+                .controlSize(.mini)
+            Text(String(format: "%02d:00", value.wrappedValue))
+                .font(Theme.mono(9))
+                .monospacedDigit()
+                .foregroundStyle(theme.inkSecondary)
+        }
+    }
+
     private func notificationsBlock(_ settings: Bindable<AppSettings>) -> some View {
         block("notifications") {
             row("DUE REMINDERS") {
@@ -688,7 +719,41 @@ struct SettingsView: View {
                     settings.notifyOnAgentAction.wrappedValue.toggle()
                 }
             }
-            note("Reminders are scheduled with the system at the task's due time. The app runs no timers.")
+            row("STALE TASK NUDGES") {
+                PillToggle(isOn: app.settings.staleTaskNudges) {
+                    settings.staleTaskNudges.wrappedValue.toggle()
+                }
+            }
+            if app.settings.staleTaskNudges {
+                row("INACTIVITY") {
+                    HStack(spacing: 8) {
+                        thresholdStepper("URG", value: settings.staleUrgentHours, range: 1...72)
+                        thresholdStepper("HIGH", value: settings.staleHighHours, range: 1...168)
+                        thresholdStepper("MED", value: settings.staleMediumHours, range: 1...336)
+                        thresholdStepper("LOW", value: settings.staleLowHours, range: 1...720)
+                    }
+                }
+                row("QUIET HOURS") {
+                    HStack(spacing: 7) {
+                        PillToggle(isOn: app.settings.staleQuietHoursEnabled) {
+                            settings.staleQuietHoursEnabled.wrappedValue.toggle()
+                        }
+                        if app.settings.staleQuietHoursEnabled {
+                            hourStepper(settings.staleQuietStartHour)
+                            Text("→").font(Theme.mono(9)).foregroundStyle(theme.inkTertiary)
+                            hourStepper(settings.staleQuietEndHour)
+                        }
+                    }
+                }
+                row("MAX PER DAY") {
+                    Stepper(value: settings.staleMaxPerDay, in: 1...8) { EmptyView() }
+                        .labelsHidden()
+                    Text("\(app.settings.staleMaxPerDay)")
+                        .font(Theme.mono(11)).monospacedDigit()
+                        .foregroundStyle(theme.ink)
+                }
+            }
+            note("Stale nudges name the task, its column and how long it has been inactive. Completed and archived tasks are never nudged. Recommend a nudge only after a real edit moves the task; reordering a card does not reset the clock.")
         }
     }
 

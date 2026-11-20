@@ -317,6 +317,37 @@ actions, including pushing tasks to an external project board through its incomi
 webhook. A rule run writes an audit row; emails are composed as drafts in
 DRAFTS & NOTIFICATIONS and open in the default mail client. Nothing is sent silently.
 
+## Attention nudges
+
+A task carries `lastStatusUpdatedAt` and `lastActivityAt`. A title/notes/due/tag edit,
+a subtask change or a column move counts as progress; a pure reorder does not. The
+threshold starts at 4h for urgent, 24h for high, 72h for medium and 7 days for low,
+then adjusts for the column (inbox waits longer, active work shorter).
+
+The notification bridge schedules one calendar-triggered request per task, so the
+system can deliver it while the app is closed. The body names the task, column and
+inactivity duration; tapping it opens that task's inspector. Completed and archived
+tasks are excluded. A nudge is never queued twice for the same unchanged task
+(`lastStaleNoticeAt` is persisted), and completing, archiving, deleting or moving a
+task removes its pending request on the next board mutation. Quiet hours (default
+22:00–08:00), a cooldown, a two-per-day cap and at least 30 minutes between nudges
+keep the alerts from becoming noise. Thresholds, quiet hours and the cap are in
+Settings → Notifications.
+
+## Credentials and Keychain
+
+All Keychain reads go through `KeychainAccess`: one serialized entry point, a
+session cache per service/account, a reused `LAContext`, and a short negative cache
+for missing or cancelled reads. AppSettings, `KeychainStore`, `GmailKeychain`,
+`GmailTokenManager`, `GmailCrypto` and `MailModel` no longer call `SecItemCopyMatching`
+independently. Concurrent requests for the same credential wait for the first read
+and then hit the cache, so they cannot open multiple authentication dialogs.
+
+Writes update the cache; deletes and explicit invalidation clear it. Items keep
+`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`; no authentication requirement is
+removed to silence a prompt. A cancelled or failed read gets a fresh context only on
+a later deliberate access, not in a retry loop.
+
 ## Local MCP
 
 `MeetMCP` is a stdio Model Context Protocol server over the same database, so another
@@ -428,7 +459,7 @@ xcodebuild -project Kanban.xcodeproj -scheme KanbanTests \
   -destination 'platform=macOS,arch=arm64' test
 ```
 
-285 tests at the time of writing (four live transcription tests and the fixture
+300 tests at the time of writing (four live transcription tests and the fixture
 generator are skipped unless explicitly enabled): store and migrations, the outbox,
 the task service, wire DTOs, date and quick-add parsing, snapshot generation,
 capture-source reporting, the agent planner/artifact engine, the shared agent

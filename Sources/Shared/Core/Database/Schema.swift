@@ -8,7 +8,7 @@ import Foundation
 /// belongs on the server.
 enum Schema {
 
-    static let version: Int32 = 5
+    static let version: Int32 = 6
 
     static func migrate(_ db: SQLiteDatabase) throws {
         let current = db.userVersion
@@ -18,6 +18,7 @@ enum Schema {
             try createV3(db)
             try createV4(db)
             try createV5(db)
+            try createV6(db)
             db.userVersion = version
             return
         }
@@ -40,6 +41,11 @@ enum Schema {
         if current < 5 {
             try createV5(db)
             db.userVersion = 5
+        }
+
+        if current < 6 {
+            try createV6(db)
+            db.userVersion = 6
         }
 
         // Keep the audit log bounded; this is a personal tool, not an audit system.
@@ -236,6 +242,31 @@ enum Schema {
     /// attachments, local drafts, the outbox and the local search indexes.
     private static func createV5(_ db: SQLiteDatabase) throws {
         try GmailSchema.create(db)
+    }
+
+    // MARK: v6
+
+    /// Inactivity tracking for stale-task nudges. Existing rows are backfilled from
+    /// `updated`, so an upgrade never marks the whole board as untouched forever.
+    private static func createV6(_ db: SQLiteDatabase) throws {
+        var columns: Set<String> = []
+        try db.query("PRAGMA table_info(tasks);") { row in
+            columns.insert(row.string(1))
+        }
+        let additions: [(String, String)] = [
+            ("last_status_updated", "REAL"),
+            ("last_activity", "REAL"),
+            ("last_stale_notice", "REAL")
+        ]
+        for (name, type) in additions where !columns.contains(name) {
+            try db.exec("ALTER TABLE tasks ADD COLUMN \(name) \(type);")
+        }
+        try db.exec("""
+            UPDATE tasks
+            SET last_status_updated = COALESCE(last_status_updated, updated),
+                last_activity = COALESCE(last_activity, updated)
+            WHERE last_status_updated IS NULL OR last_activity IS NULL;
+            """)
     }
 
     // MARK: v1 -> v2
