@@ -753,6 +753,13 @@ struct SettingsView: View {
                         .font(Theme.mono(11)).monospacedDigit()
                         .foregroundStyle(theme.ink)
                 }
+                row("COOLDOWN") {
+                    Stepper(value: settings.staleCooldownHours, in: 1...168) { EmptyView() }
+                        .labelsHidden()
+                    Text("\(app.settings.staleCooldownHours)h")
+                        .font(Theme.mono(11)).monospacedDigit()
+                        .foregroundStyle(theme.ink)
+                }
             }
             note("Stale nudges name the task, its column and how long it has been inactive. Completed and archived tasks are never nudged. Recommend a nudge only after a real edit moves the task; reordering a card does not reset the clock.")
         }
