@@ -52,6 +52,17 @@ public final class KeychainAccess: @unchecked Sendable {
         return value
     }
 
+    /// Off-main wrapper for startup and other UI paths. The synchronous read stays
+    /// for actors/background callers; this keeps a Keychain dialog from blocking
+    /// window creation or the main run loop.
+    public func dataAsync(service: String, account: String) async -> Data? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: self.data(service: service, account: account))
+            }
+        }
+    }
+
     @discardableResult
     public func set(_ data: Data, service: String, account: String) -> Bool {
         let key = cacheKey(service, account)

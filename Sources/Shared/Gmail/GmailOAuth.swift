@@ -111,6 +111,11 @@ public struct GmailKeychain: GmailTokenStore {
         read(account: "client-secret").flatMap { String(data: $0, encoding: .utf8) }
     }
 
+    public func loadClientSecretAsync() async -> String? {
+        await KeychainAccess.shared.dataAsync(service: service, account: "client-secret")
+            .flatMap { String(data: $0, encoding: .utf8) }
+    }
+
     /// 256-bit AES-GCM key for local drafts and attachments. Created once per login
     /// keychain, never synced to iCloud and never written to disk in plaintext.
     public func loadOrCreateEncryptionKey() -> Data? {

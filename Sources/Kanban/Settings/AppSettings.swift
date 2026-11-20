@@ -98,10 +98,7 @@ final class AppSettings {
     /// on every rebuild, so the system asks again. Doing that from `init` hangs the app
     /// before it has a window — and the test suite before it has a test.
     var apiKey: String {
-        get {
-            if loadedAPIKey == nil { loadedAPIKey = KeychainStore.get(.apiToken) ?? "" }
-            return loadedAPIKey ?? ""
-        }
+        get { loadedAPIKey ?? "" }
         set { commitAPIKey(newValue) }
     }
 
@@ -119,14 +116,11 @@ final class AppSettings {
         return stored
     }
 
-    @ObservationIgnored private var loadedAPIKey: String?
+    private var loadedAPIKey: String?
 
     /// The Gemini key, in the same Keychain item store as the VPS token.
     var geminiAPIKey: String {
-        get {
-            if loadedGeminiKey == nil { loadedGeminiKey = KeychainStore.get(.geminiKey) ?? "" }
-            return loadedGeminiKey ?? ""
-        }
+        get { loadedGeminiKey ?? "" }
         set { commitGeminiAPIKey(newValue) }
     }
 
@@ -140,17 +134,12 @@ final class AppSettings {
         return stored
     }
 
-    @ObservationIgnored private var loadedGeminiKey: String?
+    private var loadedGeminiKey: String?
 
     /// The OAuth client secret, when the Google project supplies one. Never in
     /// UserDefaults and never in the source tree.
     var gmailClientSecret: String {
-        get {
-            if loadedGmailSecret == nil {
-                loadedGmailSecret = GmailKeychain().loadClientSecret() ?? ""
-            }
-            return loadedGmailSecret ?? ""
-        }
+        get { loadedGmailSecret ?? "" }
         set { commitGmailClientSecret(newValue) }
     }
 
@@ -172,7 +161,7 @@ final class AppSettings {
         return stored
     }
 
-    @ObservationIgnored private var loadedGmailSecret: String?
+    private var loadedGmailSecret: String?
 
     /// The Google desktop client ID and optional secret, as one value.
     var gmailOAuthConfig: GmailOAuthConfig {
@@ -198,6 +187,21 @@ final class AppSettings {
             quietEndHour: staleQuietEndHour,
             cooldownHours: Double(max(1, staleCooldownHours)),
             maxPerDay: max(1, staleMaxPerDay))
+    }
+
+    /// Loads credentials once, off the main thread, so window creation and the
+    /// first render never enter a Keychain authentication dialog. Getters only ever
+    /// read the cached values.
+    func preloadCredentials() async {
+        if loadedAPIKey == nil, backendIsConfigured {
+            loadedAPIKey = await KeychainStore.getAsync(.apiToken) ?? ""
+        }
+        if loadedGeminiKey == nil {
+            loadedGeminiKey = await KeychainStore.getAsync(.geminiKey) ?? ""
+        }
+        if loadedGmailSecret == nil, !gmailClientID.isEmpty {
+            loadedGmailSecret = await GmailKeychain().loadClientSecretAsync() ?? ""
+        }
     }
 
     /// True when meeting analysis and the local agent can run.

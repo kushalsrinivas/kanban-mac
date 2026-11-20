@@ -57,6 +57,7 @@ struct SettingsView: View {
             app.refreshStaleNotifications()
         }
         .onAppear {
+            Task { await app.settings.preloadCredentials() }
             recordingsBytes = KanbanPaths.recordingsByteCount()
             apiKeyDraft = app.settings.apiKey
             apiKeyStored = !apiKeyDraft.isEmpty

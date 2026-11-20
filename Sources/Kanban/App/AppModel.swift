@@ -305,6 +305,9 @@ final class AppModel {
         AgentDiagnostics.runIfRequested(self)
         #endif
         Task {
+            // Credentials load off-main; until they arrive the getters return the
+            // session cache rather than blocking this actor on a Keychain dialog.
+            await settings.preloadCredentials()
             // With a Gemini key the pipeline is local; retry anything left ready
             // when the app last closed without waiting for a server.
             if settings.hasGeminiKey, settings.autoUpload { processor.processPending() }
