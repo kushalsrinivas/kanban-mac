@@ -81,31 +81,44 @@ final class AgentCRUDTests: XCTestCase {
         }
     }
 
-    func testLongBrainDumpGoesToTheModelAndCreatesEveryTask() async throws {
+    func testEnumeratedBrainDumpCreatesEveryTaskOffline() async throws {
         let prompt = "add these todo basically i need to work on few stuff one is courses folio website completion and setting it up secondly newstok ai processing to be moved to the phone and then cleriko app submission and then introduction of haven to the desktop world aswell"
         var context = AgentContext()
+        guard case .createTasks(let drafts) = AgentPlanner.plan(prompt, context: context) else {
+            return XCTFail("an enumerated list should be split deterministically")
+        }
+        XCTAssertEqual(drafts.count, 4)
+        XCTAssertTrue(drafts[0].title.lowercased().contains("courses folio"))
+        XCTAssertTrue(drafts[1].title.lowercased().contains("newstok"))
+        XCTAssertTrue(drafts[2].title.lowercased().contains("cleriko"))
+        XCTAssertTrue(drafts[3].title.lowercased().contains("haven"))
+        XCTAssertFalse(drafts[3].title.lowercased().contains("aswell"),
+                       "the trailing filler must not become part of the title")
+
+        let agent = session()
+        agent.send(prompt)
+        await waitUntil { !agent.isBusy }
+
+        XCTAssertEqual(store.tasks.count, 4)
+        XCTAssertEqual(store.tasks.filter { $0.source == .agent }.count, 4)
+        XCTAssertTrue(agent.pending.isEmpty)
+        XCTAssertEqual(agent.messages.filter { $0.kind == .applied }.count, 4)
+    }
+
+    func testNonEnumeratedLongRequestStillGoesToTheModel() async throws {
+        let prompt = "add some tasks for the launch I keep postponing and figure out the right breakdown for me"
+        var context = AgentContext()
         guard case .askModel = AgentPlanner.plan(prompt, context: context) else {
-            return XCTFail("a long multi-task brain dump should be handed to the model")
+            return XCTFail("non-enumerated intent should be handed to Gemini")
         }
 
-        let model = MultiCreateModel(titles: [
-            "Courses folio website completion and setup",
-            "Move newstok AI processing to the phone",
-            "Cleriko app submission",
-            "Introduce Haven to the desktop world"
-        ])
+        let model = MultiCreateModel(titles: ["Alpha launch", "Beta launch"])
         let agent = session(model: model)
         agent.send(prompt)
         await waitUntil { !agent.isBusy }
 
-        XCTAssertEqual(Set(store.tasks.map(\.title)), Set([
-            "Courses folio website completion and setup",
-            "Move newstok AI processing to the phone",
-            "Cleriko app submission",
-            "Introduce Haven to the desktop world"
-        ]))
-        XCTAssertTrue(agent.pending.isEmpty, "safe creates from the model apply immediately")
-        XCTAssertEqual(agent.messages.filter { $0.kind == .applied }.count, 4)
+        XCTAssertEqual(Set(store.tasks.map(\.title)), ["Alpha launch", "Beta launch"])
+        XCTAssertTrue(agent.pending.isEmpty)
     }
 
     func testAgentJSONDecoderToleratesFencesAndRepeatedObjects() throws {

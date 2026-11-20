@@ -205,6 +205,13 @@ public final class AgentEngine {
             turn = propose(.create(title: title, notes: notes, due: due, priority: priority,
                                    status: status, tags: tags))
 
+        case .createTasks(let drafts):
+            onStage(.processing("board"))
+            turn = Turn(operations: drafts.map {
+                .create(title: $0.title, notes: $0.notes, due: $0.due,
+                        priority: $0.priority, status: $0.status, tags: $0.tags)
+            }, suggestions: ["What's on my todo?", "Show my recent meetings"])
+
         case .renameTask(let selector, let title):
             onStage(.processing("board"))
             turn = update(selector, context: &context) { task in

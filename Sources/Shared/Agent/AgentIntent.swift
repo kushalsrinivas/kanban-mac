@@ -129,6 +129,27 @@ public enum AgentEmailSelector: Equatable, Sendable {
 
 // MARK: - Intent
 
+/// One task from an enumerated multi-item request.
+public struct AgentTaskDraft: Equatable, Sendable {
+    public var title: String
+    public var notes: String?
+    public var due: String?
+    public var priority: Priority?
+    public var status: TaskStatus?
+    public var tags: [String]
+
+    public init(title: String, notes: String? = nil, due: String? = nil,
+                priority: Priority? = nil, status: TaskStatus? = nil,
+                tags: [String] = []) {
+        self.title = title
+        self.notes = notes
+        self.due = due
+        self.priority = priority
+        self.status = status
+        self.tags = tags
+    }
+}
+
 public enum AgentIntent: Equatable, Sendable {
     case help
     case taskList(AgentTaskFilter)
@@ -164,6 +185,7 @@ public enum AgentIntent: Equatable, Sendable {
     case emailSuggestLabels(AgentEmailSelector)
     case createTask(title: String, notes: String?, due: String?,
                     priority: Priority?, status: TaskStatus?, tags: [String])
+    case createTasks([AgentTaskDraft])
     case renameTask(AgentTaskSelector, title: String)
     case setDue(AgentTaskSelector, due: String)
     case setPriority(AgentTaskSelector, priority: Priority)
@@ -263,9 +285,10 @@ public enum AgentPlanner {
         if isOpenMeeting(text) {
             return .openMeeting(meetingReference(text, context: context, defaultToLatest: true) ?? .latest)
         }
-        // Long imperative prose is an LLM-shaped request, not a regex-shaped one:
-        // "add these todos … one is X secondly Y then Z". Let the model decompose it
-        // into multiple validated create_task actions; short commands stay local.
+        // An explicitly enumerated list ("one is X secondly Y then Z") is
+        // deterministic and must not depend on a model completing in time. Other
+        // long imperative prose goes to Gemini to decompose.
+        if let drafts = multiTaskDrafts(raw, now: now) { return .createTasks(drafts) }
         if isComplexWriteRequest(text) { return .askModel(raw) }
         if let intent = writeIntent(raw, context: context, now: now) { return intent }
         // "add some sample todo items please" is an imperative with a quantifier,
@@ -477,6 +500,105 @@ public enum AgentPlanner {
 
     /// A multi-clause instruction deserves the model. The threshold keeps ordinary
     /// one-line commands deterministic while a brain dump goes to Gemini.
+    // MARK: Multi-task prose
+
+    private static let multiTaskTriggers = [
+        #"^(?:add|create|make)\s+(?:these|some|a few|the following|my)\s+(?:todos?|tasks?|items?)\b[\s:,\-]*(.*)$"#,
+        #"^(?:i|we)\s+(?:need|have|want)\s+to\s+(?:work on|do|finish|handle)\s+(.*)$"#,
+        #"^add\s+(?:the following|these)\b[\s:,\-]*(.*)$"#,
+        #"^break\s+(?:this|it)\s+(?:down|into tasks)\b[\s:,\-]*(.*)$"#
+    ]
+
+    /// Splits an explicitly enumerated brain dump into drafts. This is deliberately
+    /// not a general NL parser: "one is… secondly… then…" is a shape that must
+    /// survive a slow or offline model. Everything else is left to Gemini.
+    private static func multiTaskDrafts(_ raw: String, now: Date) -> [AgentTaskDraft]? {
+        let original = raw.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+        guard let match = multiTaskTriggers.compactMap({ matches($0, original) }).first,
+              match.count > 1 else { return nil }
+
+        let body = match[1]
+        guard !body.isEmpty else { return nil }
+
+        let marker = try? NSRegularExpression(
+            pattern: #"\b(?:one is|firstly|first is|first|secondly|second is|second|thirdly|third is|third|fourthly|fourth is|fourth|fifthly|fifth is|fifth|and then|then|next|also|finally|lastly)\b"#,
+            options: [.caseInsensitive])
+        var pieces: [String] = []
+        if let marker {
+            let full = NSRange(body.startIndex..<body.endIndex, in: body)
+            let found = marker.matches(in: body, range: full)
+            if found.count >= 1 {
+                var cursor = body.startIndex
+                for foundMatch in found {
+                    guard let range = Range(foundMatch.range, in: body) else { continue }
+                    pieces.append(String(body[cursor..<range.lowerBound]))
+                    cursor = range.upperBound
+                }
+                pieces.append(String(body[cursor...]))
+            }
+        }
+        if pieces.isEmpty {
+            pieces = body.components(separatedBy: CharacterSet(charactersIn: ";\n"))
+        }
+
+        var drafts: [AgentTaskDraft] = []
+        var seen = Set<String>()
+        for piece in pieces {
+            guard let draft = cleanDraft(piece, now: now) else { continue }
+            let key = draft.title.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            drafts.append(draft)
+            if drafts.count == 12 { break }
+        }
+        guard drafts.count >= 2 else { return nil }
+        return drafts
+    }
+
+    private static func cleanDraft(_ raw: String, now: Date) -> AgentTaskDraft? {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+        let leading = ["basically", "i need to", "i have to", "i want to", "we need to",
+                       "we have to", "work on", "few stuff", "few things", "some stuff",
+                       "some things", "please", "and", "then", "also", "to"]
+        var changed = true
+        while changed {
+            changed = false
+            for prefix in leading where text.lowercased().hasPrefix(prefix + " ") {
+                text = String(text.dropFirst(prefix.count + 1))
+                changed = true
+            }
+        }
+        let trailing = ["aswell", "as well", "too", "please"]
+        changed = true
+        while changed {
+            changed = false
+            for suffix in trailing where text.lowercased().hasSuffix(" " + suffix) {
+                text = String(text.dropLast(suffix.count + 1))
+                changed = true
+            }
+        }
+        text = text
+            .replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+        guard text.count >= 3, text.contains(where: { $0.isLetter }) else { return nil }
+        guard !["stuff", "things", "few stuff", "few things"].contains(text.lowercased()) else {
+            return nil
+        }
+
+        let parsed = QuickParse.parse(text, now: now)
+        var title = parsed.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return nil }
+        // Sentence case, not all-lowercase dictation.
+        title = title.prefix(1).uppercased() + String(title.dropFirst())
+
+        return AgentTaskDraft(
+            title: String(title),
+            notes: nil,
+            due: parsed.due.map { DateInput.iso($0) },
+            priority: parsed.priority,
+            status: parsed.status,
+            tags: parsed.tags)
+    }
+
     /// Imperative openers that can only mean a mutation. The deterministic parser
     /// always gets first refusal; this is the safety net that keeps a write phrase
     /// from falling through into a read like "the TODO column is empty".

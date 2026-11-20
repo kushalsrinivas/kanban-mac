@@ -428,7 +428,7 @@ xcodebuild -project Kanban.xcodeproj -scheme KanbanTests \
   -destination 'platform=macOS,arch=arm64' test
 ```
 
-284 tests at the time of writing (four live transcription tests and the fixture
+285 tests at the time of writing (four live transcription tests and the fixture
 generator are skipped unless explicitly enabled): store and migrations, the outbox,
 the task service, wire DTOs, date and quick-add parsing, snapshot generation,
 capture-source reporting, the agent planner/artifact engine, the shared agent
