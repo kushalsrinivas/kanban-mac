@@ -41,6 +41,12 @@ touched.
 | Compact 780×520 | Status module clipped; no indication of missing columns. | Metrics compressed; board scrolls and follows ⌘1–4; the right-edge clip at the capture size is documented. |
 | Wide 1440×900 | Board hugged the left. | Columns expand to their cap and stay aligned with the gutter. |
 
+## Gmail workspace evidence
+
+`gmail/` contains eight frames captured with the same harness after the local Gmail
+workspace landed: inbox, conversation, dark mode, composer, three agent email
+artifacts (unread, search, attention), and the FileVault enforcement gate. See `gmail/README.md`.
+
 ## Files
 
 `before/` and `after/` each contain:

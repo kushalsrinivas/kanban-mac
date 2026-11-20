@@ -52,6 +52,10 @@ struct MeetingDetailView: View {
                     }
                 }
 
+                if !app.gmailStore.accounts.isEmpty {
+                    RelatedEmailSection(meeting: meeting)
+                }
+
                 if meeting.status == .completed, meeting.summary.isEmpty {
                     Text("Transcribed on this Mac. Add a Gemini key in Settings → Local AI for a summary and action items.")
                         .font(Theme.mono(9.5))

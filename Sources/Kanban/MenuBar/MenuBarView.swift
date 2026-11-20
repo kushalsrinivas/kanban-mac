@@ -193,6 +193,11 @@ struct MenuBarView: View {
                     }
                 }
             }
+            MenuAction(label: "MAIL\(app.mail.counts.inboxUnread > 0 ? " · \(app.mail.counts.inboxUnread)" : "")",
+                       shortcut: "") {
+                openMain()
+                app.openMail()
+            }
             MenuAction(label: "ASK AGENT", shortcut: "") {
                 openMain()
                 app.section = .agent

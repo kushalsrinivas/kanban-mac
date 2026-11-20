@@ -36,6 +36,8 @@ public final class AgentEngine {
     /// Read-only events from the Mac's system calendars. Local scheduled meetings
     /// and external events share one brief/list surface; only local ones are editable.
     private let externalScheduledMeetings: () -> [ScheduledMeeting]
+    /// Local Gmail cache. Read-only here; writes become proposed operations.
+    private let gmail: GmailDataSource?
     private let logger = Logger(subsystem: "com.kanban.app", category: "agent")
     /// Transcripts are paged from SQLite. One turn may match several meetings, so
     /// each is read at most once per turn rather than once per check.
@@ -43,11 +45,13 @@ public final class AgentEngine {
 
     public init(store: LocalStore, remotePlayback: Bool = false,
                 now: @escaping () -> Date = Date.init,
-                externalScheduledMeetings: @escaping () -> [ScheduledMeeting] = { [] }) {
+                externalScheduledMeetings: @escaping () -> [ScheduledMeeting] = { [] },
+                gmail: GmailDataSource? = nil) {
         self.store = store
         self.remotePlayback = remotePlayback
         self.now = now
         self.externalScheduledMeetings = externalScheduledMeetings
+        self.gmail = gmail
     }
 
     // MARK: Turn
@@ -57,6 +61,11 @@ public final class AgentEngine {
         transcriptCache.removeAll(keepingCapacity: true)
         let intent = AgentPlanner.plan(text, context: context, now: now())
         onStage(.thinking)
+        if intent.isEmailIntent, gmail?.isSecurityLocked == true {
+            onStage(.done)
+            return Turn(reply: "Mail is locked until FileVault is verified. Open Mail or Settings → Gmail and press RECHECK.",
+                        suggestions: ["What's on my todo?", "Show my recent meetings"])
+        }
         var turn: Turn
 
         switch intent {
@@ -126,6 +135,71 @@ public final class AgentEngine {
                         navigation: .recorder,
                         suggestions: ["Show my recent meetings", "What's on my todo?"])
 
+        case .openMail:
+            turn = Turn(reply: "Opening your mail.",
+                        navigation: .mail(accountID: nil, threadID: nil),
+                        suggestions: emailSuggestions)
+
+        case .emailUnread:
+            onStage(.searching("email"))
+            turn = emailUnread(context: &context)
+
+        case .emailAttention:
+            onStage(.searching("email"))
+            turn = emailAttention(context: &context)
+
+        case .emailSummarize(let selector):
+            onStage(.retrieving("email"))
+            turn = emailSummarize(selector, context: &context)
+
+        case .emailConversation(let person):
+            onStage(.searching("email"))
+            turn = emailConversation(person, context: &context)
+
+        case .emailCommitments(let person):
+            onStage(.retrieving("email commitments"))
+            turn = emailCommitments(person, context: &context)
+
+        case .emailSearch(let query):
+            onStage(.searching("email"))
+            turn = emailSearch(query, context: &context)
+
+        case .emailOpen(let selector):
+            onStage(.processing("navigation"))
+            turn = emailOpen(selector, context: &context)
+
+        case .emailDraftReply(let selector, let all):
+            onStage(.processing("draft"))
+            turn = emailDraftReply(selector, all: all, context: &context)
+
+        case .emailCompose(let to, let subject, let body):
+            onStage(.processing("draft"))
+            turn = emailCompose(to: to, subject: subject, body: body, context: &context)
+
+        case .emailFollowUp(let selector):
+            onStage(.processing("draft"))
+            turn = emailFollowUp(selector, context: &context)
+
+        case .emailArchive(let selector):
+            onStage(.processing("email"))
+            turn = emailAction(selector, action: .archive, context: &context)
+
+        case .emailTrash(let selector):
+            onStage(.processing("email"))
+            turn = emailAction(selector, action: .trash, context: &context)
+
+        case .emailMarkRead(let selector, let read):
+            onStage(.processing("email"))
+            turn = emailAction(selector, action: .read(read), context: &context)
+
+        case .emailLabel(let selector, let labels, let add):
+            onStage(.processing("email"))
+            turn = emailAction(selector, action: .label(labels, add: add), context: &context)
+
+        case .emailSuggestLabels(let selector):
+            onStage(.processing("email"))
+            turn = emailSuggestLabels(selector, context: &context)
+
         case .createTask(let title, let notes, let due, let priority, let status, let tags):
             onStage(.processing("board"))
             turn = propose(.create(title: title, notes: notes, due: due, priority: priority,
@@ -179,6 +253,11 @@ public final class AgentEngine {
             onStage(.processing("board"))
             turn = taskOperation(selector, context: &context, verb: "delete",
                                  pending: .delete) { .delete($0) }
+
+        case .askModel(let query):
+            // The session decides whether a model is configured; this is the
+            // deterministic engine saying "this needs one".
+            turn = Turn(fallback: true, fallbackQuery: query)
 
         case .keywordSearch(let subject):
             onStage(.searching("everything"))
@@ -716,8 +795,9 @@ public final class AgentEngine {
     // MARK: Writes
 
     private func propose(_ operation: AgentOperation) -> Turn {
-        Turn(reply: "Ready to \(operation.kind == .createTask ? "create" : "change") this. Confirm it in PROPOSED OPERATIONS.",
-             operations: [operation],
+        // The session knows the auto-apply policy; a hard-coded "confirm it" here
+        // was wrong the moment safe writes started applying immediately.
+        Turn(operations: [operation],
              suggestions: ["What's on my todo?", "Show my recent meetings"])
     }
 
@@ -749,6 +829,397 @@ public final class AgentEngine {
     }
 
     // MARK: Keyword search
+
+    // MARK: Reads — mail
+
+    private var emailSuggestions: [String] {
+        ["Summarize my unread emails",
+         "Which emails need my attention?",
+         "Find the latest conversation with…",
+         "Search email for pricing"]
+    }
+
+    private func gmailUnavailable() -> Turn {
+        Turn(reply: "Connect a Gmail account in Settings → Gmail first.",
+             suggestions: ["Open my inbox", "What's on my todo?"])
+    }
+
+    private func accountsByID() -> [UUID: GmailAccount] {
+        guard let gmail else { return [:] }
+        return Dictionary(uniqueKeysWithValues: gmail.accounts.map { ($0.id, $0) })
+    }
+
+    private func emailListTurn(_ threads: [GmailThreadSummary], title: String,
+                               reply: String, context: inout AgentContext,
+                               reasons: [String: String]? = nil,
+                               note: String? = nil) -> Turn {
+        guard gmail != nil else { return gmailUnavailable() }
+        let artifact = AgentArtifactBuilder.emails(
+            threads, accounts: accountsByID(), title: title, reasons: reasons, note: note)
+        context.record(emails: threads.map {
+            AgentContext.EmailRef(accountID: $0.accountID, threadID: $0.id)
+        }, topic: title)
+        return Turn(reply: reply, artifacts: [artifact], suggestions: emailSuggestions)
+    }
+
+    private func emailUnread(context: inout AgentContext) -> Turn {
+        guard let gmail else { return gmailUnavailable() }
+        let summary = GmailAgentReader.unread(gmail)
+        return emailListTurn(summary.threads, title: "UNREAD EMAIL",
+                             reply: summary.reply, context: &context,
+                             note: "Answered from the local cache. No message content was sent anywhere.")
+    }
+
+    private func emailAttention(context: inout AgentContext) -> Turn {
+        guard let gmail else { return gmailUnavailable() }
+        let items = GmailAgentReader.attention(source: gmail)
+        guard !items.isEmpty else {
+            return emailListTurn([], title: "NEEDS ATTENTION",
+                                 reply: "Nothing in your inbox is asking for a decision right now.",
+                                 context: &context)
+        }
+        let reasons = Dictionary(uniqueKeysWithValues: items.map { ($0.thread.id, $0.reason) })
+        let reply = "\(items.count) conversation\(items.count == 1 ? "" : "s") need attention. "
+            + "Ranked locally by unread, stars, questions and deadlines."
+        return emailListTurn(items.map(\.thread), title: "NEEDS ATTENTION",
+                             reply: reply, context: &context, reasons: reasons)
+    }
+
+    private func emailSummarize(_ selector: AgentEmailSelector,
+                                context: inout AgentContext) -> Turn {
+        switch resolveEmail(selector, context: &context) {
+        case .none:
+            return Turn(reply: "Open or search for a conversation first.",
+                        suggestions: emailSuggestions)
+        case .many(let threads):
+            return emailListTurn(threads, title: "SUMMARIZE WHICH?",
+                                 reply: "Which conversation should I summarize?",
+                                 context: &context)
+        case .one(let account, let thread):
+            let insight = GmailInsight.insight(for: thread, accountID: account.id)
+            let artifact = AgentArtifactBuilder.emailThread(
+                thread, account: account, insight: insight.summary,
+                commitments: insight.commitments,
+                note: "Summarized locally from the cached messages.")
+            return Turn(reply: "Summary · \(thread.summary.displaySubject).",
+                        artifacts: [artifact],
+                        suggestions: ["Reply to this email", "What did they promise?",
+                                      "Which emails need my attention?"])
+        }
+    }
+
+    private func emailConversation(_ person: String, context: inout AgentContext) -> Turn {
+        guard let gmail else { return gmailUnavailable() }
+        let threads = GmailAgentReader.conversation(person, source: gmail)
+        let title = "WITH \(person.uppercased())"
+        if threads.isEmpty {
+            return emailListTurn([], title: title,
+                                 reply: "I couldn't find an email conversation with \(person) in the local cache.",
+                                 context: &context)
+        }
+        return emailListTurn(threads, title: title,
+                             reply: "\(threads.count) conversation\(threads.count == 1 ? "" : "s") with \(person), newest first.",
+                             context: &context)
+    }
+
+    private func emailCommitments(_ person: String?, context: inout AgentContext) -> Turn {
+        guard let gmail else { return gmailUnavailable() }
+        let items = GmailAgentReader.commitments(person: person, source: gmail)
+        let title = person.map { "COMMITMENTS · \($0.uppercased())" } ?? "EMAIL COMMITMENTS"
+        let artifact = AgentArtifactBuilder.emailCommitments(
+            items, title: title,
+            note: "Extracted locally from message text; every quote is verbatim.")
+        let refs = items.reduce(into: [AgentContext.EmailRef]()) { result, item in
+            let ref = AgentContext.EmailRef(accountID: item.accountID,
+                                            threadID: item.threadID,
+                                            messageID: item.messageID)
+            if !result.contains(ref) { result.append(ref) }
+        }
+        context.record(emails: refs)
+        let reply = items.isEmpty
+            ? "I didn't find a promise or deadline in those emails."
+            : "\(items.count) commitment\(items.count == 1 ? "" : "s") found in email."
+        return Turn(reply: reply, artifacts: [artifact],
+                    suggestions: ["Summarize my unread emails", "Which emails need my attention?"])
+    }
+
+    private func emailSearch(_ query: GmailQuery, context: inout AgentContext) -> Turn {
+        guard let gmail else { return gmailUnavailable() }
+        let threads = gmail.searchThreads(query, accountID: nil, limit: 20)
+        var title = "EMAIL SEARCH"
+        if let from = query.from { title = "FROM \(from.uppercased())" }
+        else if let subject = query.subject { title = "SUBJECT · \(subject.uppercased())" }
+        else if !query.text.isEmpty { title = "“\(query.text.uppercased())”" }
+        let reply: String
+        if threads.isEmpty {
+            reply = "No email matches \(query.text.isEmpty ? "that filter" : "“\(query.text)”") in the local cache."
+        } else {
+            reply = "\(threads.count) conversation\(threads.count == 1 ? "" : "s") found locally."
+        }
+        return emailListTurn(threads, title: title, reply: reply, context: &context,
+                             note: "Searched subject, sender, recipients and message text on this Mac.")
+    }
+
+    private enum EmailResolution {
+        case one(GmailAccount, GmailThread)
+        case many([GmailThreadSummary])
+        case none
+    }
+
+    private func resolveEmail(_ selector: AgentEmailSelector,
+                              context: inout AgentContext) -> EmailResolution {
+        guard let gmail else { return .none }
+        func load(_ ref: AgentContext.EmailRef) -> EmailResolution {
+            guard let account = gmail.account(ref.accountID),
+                  let thread = gmail.thread(accountID: ref.accountID, threadID: ref.threadID) else {
+                return .none
+            }
+            return .one(account, thread)
+        }
+        switch selector {
+        case .id(let accountID, let threadID):
+            return load(AgentContext.EmailRef(accountID: accountID, threadID: threadID))
+        case .current:
+            guard let last = context.lastEmail else { return .none }
+            return load(last)
+        case .ordinal(let index):
+            guard !context.emailRefs.isEmpty else { return .none }
+            let resolved = index == -1 ? context.emailRefs.count - 1 : index - 1
+            guard context.emailRefs.indices.contains(resolved) else { return .none }
+            return load(context.emailRefs[resolved])
+        case .query(let raw):
+            let threads = GmailAgentReader.conversation(raw, source: gmail)
+            guard !threads.isEmpty else { return .none }
+            if threads.count == 1, let first = threads.first {
+                return load(AgentContext.EmailRef(accountID: first.accountID,
+                                                  threadID: first.id))
+            }
+            return .many(threads)
+        }
+    }
+
+    private func emailOpen(_ selector: AgentEmailSelector,
+                           context: inout AgentContext) -> Turn {
+        guard gmail != nil else { return gmailUnavailable() }
+        switch resolveEmail(selector, context: &context) {
+        case .none:
+            return Turn(reply: "I couldn't find that email in the local cache.",
+                        suggestions: emailSuggestions)
+        case .many(let threads):
+            return emailListTurn(threads, title: "WHICH CONVERSATION?",
+                                 reply: "Several conversations match. Pick one.",
+                                 context: &context)
+        case .one(let account, let thread):
+            let ref = AgentContext.EmailRef(accountID: account.id, threadID: thread.id)
+            context.focus(email: ref)
+            let insight = GmailInsight.insight(for: thread, accountID: account.id)
+            let artifact = AgentArtifactBuilder.emailThread(
+                thread, account: account, insight: insight.summary,
+                commitments: insight.commitments)
+            return Turn(reply: "\(thread.summary.displaySubject) · \(thread.summary.messageCount) message\(thread.summary.messageCount == 1 ? "" : "s").",
+                        artifacts: [artifact],
+                        navigation: .mail(accountID: account.id, threadID: thread.id),
+                        suggestions: ["Reply to this email", "Summarize this conversation",
+                                      "What did they promise?"])
+        }
+    }
+
+    private func emailDraftReply(_ selector: AgentEmailSelector, all: Bool,
+                                 context: inout AgentContext) -> Turn {
+        guard gmail != nil else { return gmailUnavailable() }
+        switch resolveEmail(selector, context: &context) {
+        case .none:
+            return Turn(reply: "Open or search for the email you want to answer first.",
+                        suggestions: emailSuggestions)
+        case .many(let threads):
+            return emailListTurn(threads, title: "REPLY TO WHICH?",
+                                 reply: "Which conversation should the reply go to?",
+                                 context: &context)
+        case .one(let account, let thread):
+            guard let message = thread.orderedMessages.last else {
+                return Turn(reply: "That thread has no message to reply to.")
+            }
+            let draft = GmailCompose.reply(thread: thread, message: message,
+                                           account: account, all: all)
+            return proposeEmailDraft(draft, account: account, context: &context)
+        }
+    }
+
+    private func emailCompose(to: String?, subject: String, body: String?,
+                              context: inout AgentContext) -> Turn {
+        guard let gmail else { return gmailUnavailable() }
+        guard let account = context.lastEmail.flatMap({ gmail.account($0.accountID) })
+                ?? gmail.accounts.first else {
+            return gmailUnavailable()
+        }
+        var recipients: [GmailAddress] = []
+        if let to, !to.isEmpty {
+            if to.contains("@") {
+                recipients = [GmailAddress(raw: to)]
+            } else {
+                recipients = GmailMeetingBridge.addresses(for: [to], source: gmail,
+                                                          accountID: account.id)
+                if recipients.isEmpty {
+                    recipients = [GmailAddress(name: to, email: "")]
+                }
+            }
+        }
+        let draft = GmailCompose.new(account: account, to: recipients,
+                                     subject: subject, body: body ?? "")
+        return proposeEmailDraft(draft, account: account, context: &context)
+    }
+
+    private func emailFollowUp(_ selector: AgentMeetingSelector,
+                               context: inout AgentContext) -> Turn {
+        guard let gmail else { return gmailUnavailable() }
+        switch resolveMeeting(selector, context: context) {
+        case .none:
+            return Turn(reply: "I couldn't find that meeting.",
+                        suggestions: ["Show my recent meetings", "Open my inbox"])
+        case .many(let meetings):
+            return Turn(reply: "Which meeting should the follow-up cover?",
+                        artifacts: [meetingListArtifact(meetings, title: "FOLLOW UP WITH WHICH MEETING?")])
+        case .one(let meeting):
+            let related = GmailMeetingBridge.relatedThreads(
+                for: meeting, source: gmail, limit: 1).first
+            guard let account = related.flatMap({ gmail.account($0.accountID) })
+                    ?? gmail.accounts.first else { return gmailUnavailable() }
+            let draft = GmailCompose.followUp(meeting: meeting, source: gmail, account: account)
+            return proposeEmailDraft(draft, account: account, context: &context,
+                                     note: "Built from the meeting summary, decisions and action items.")
+        }
+    }
+
+    private func proposeEmailDraft(_ draft: GmailDraft, account: GmailAccount,
+                                   context: inout AgentContext,
+                                   note: String? = nil) -> Turn {
+        let operation = AgentOperation.createDraft(draft, accountEmail: account.email)
+        let artifact = AgentArtifactBuilder.emailDraft(
+            draft, accountEmail: account.email,
+            note: note ?? "Nothing is sent. EXECUTE saves this as a Gmail draft you can edit.")
+        return Turn(reply: "Draft prepared. It is a proposal until you press EXECUTE; sending always needs a separate confirmation.",
+                    artifacts: [artifact], operations: [operation],
+                    suggestions: ["Open my drafts", "Summarize my unread emails"])
+    }
+
+    private enum EmailActionKind {
+        case archive
+        case trash
+        case read(Bool)
+        case label([String], add: Bool)
+    }
+
+    private func emailSuggestLabels(_ selector: AgentEmailSelector,
+                                    context: inout AgentContext) -> Turn {
+        guard let gmail else { return gmailUnavailable() }
+        let threads: [GmailThreadSummary]
+        switch resolveEmail(selector, context: &context) {
+        case .none:
+            return Turn(reply: "Open or search for a conversation first.",
+                        suggestions: emailSuggestions)
+        case .one(_, let thread):
+            threads = [thread.summary]
+        case .many(let found):
+            threads = found
+        }
+        guard let first = threads.first else { return Turn(reply: "No email selected.") }
+        let text = threads.map { $0.subject + " " + $0.snippet }
+            .joined(separator: " ").lowercased()
+        var suggestions: [String] = []
+        for label in gmail.labels(accountID: first.accountID) where label.isUserLabel {
+            if text.contains(label.name.lowercased()) { suggestions.append(label.name) }
+        }
+        let heuristics: [(String, [String])] = [
+            ("Finance", ["invoice", "payment", "receipt", "billing", "pricing", "quote"]),
+            ("Legal", ["contract", "agreement", "terms", "legal", "signature"]),
+            ("Meetings", ["meeting", "sync", "agenda", "calendar"]),
+            ("Newsletters", ["newsletter", "digest", "unsubscribe"]),
+            ("Follow Up", ["?", "asap", "deadline", "follow up", "blocked"])
+        ]
+        for (name, needles) in heuristics
+        where needles.contains(where: { text.contains($0) }) {
+            if !suggestions.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) {
+                suggestions.append(name)
+            }
+        }
+        suggestions = Array(suggestions.prefix(4))
+        context.record(emails: threads.map {
+            AgentContext.EmailRef(accountID: $0.accountID, threadID: $0.id)
+        })
+        let reply = suggestions.isEmpty
+            ? "No strong label signal in \(first.displaySubject)."
+            : "Suggested labels for \(first.displaySubject): \(suggestions.joined(separator: ", ")). Nothing was applied."
+        return Turn(reply: reply, suggestions: emailSuggestions)
+    }
+
+    private func emailAction(_ selector: AgentEmailSelector?, action: EmailActionKind,
+                             context: inout AgentContext) -> Turn {
+        guard let gmail else { return gmailUnavailable() }
+        let threads: [GmailThreadSummary]
+        if let selector {
+            switch resolveEmail(selector, context: &context) {
+            case .none:
+                return Turn(reply: "I couldn't find the email to change.")
+            case .one(_, let thread):
+                threads = [thread.summary]
+            case .many(let found):
+                threads = found
+            }
+        } else {
+            threads = context.emailRefs.compactMap { ref in
+                gmail.summary(accountID: ref.accountID, threadID: ref.threadID)
+            }
+        }
+        guard !threads.isEmpty else {
+            return Turn(reply: "Search or open an email first, then say what to do with it.",
+                        suggestions: emailSuggestions)
+        }
+
+        var operations: [AgentOperation] = []
+        for (accountID, group) in Dictionary(grouping: threads, by: \.accountID) {
+            guard let account = gmail.account(accountID) else { continue }
+            switch action {
+            case .archive:
+                if let operation = AgentOperation.archiveEmail(group, accountEmail: account.email) {
+                    operations.append(operation)
+                }
+            case .trash:
+                if let operation = AgentOperation.trashEmail(group, accountEmail: account.email) {
+                    operations.append(operation)
+                }
+            case .read(let read):
+                if let operation = AgentOperation.markEmailRead(group, read: read,
+                                                                 accountEmail: account.email) {
+                    operations.append(operation)
+                }
+            case .label(let names, let add):
+                let available = gmail.labels(accountID: accountID)
+                let ids = names.compactMap { name in
+                    available.first {
+                        $0.id.caseInsensitiveCompare(name) == .orderedSame
+                            || $0.name.caseInsensitiveCompare(name) == .orderedSame
+                    }?.id
+                }
+                if ids.isEmpty {
+                    return Turn(reply: "No label named \(names.joined(separator: ", ")) exists in \(account.email).")
+                }
+                if let operation = AgentOperation.emailLabels(group, labels: ids,
+                                                               add: add,
+                                                               accountEmail: account.email) {
+                    operations.append(operation)
+                }
+            }
+        }
+        guard !operations.isEmpty else {
+            return Turn(reply: "I couldn't prepare that change.")
+        }
+        context.record(emails: threads.map {
+            AgentContext.EmailRef(accountID: $0.accountID, threadID: $0.id)
+        })
+        return Turn(reply: "\(operations.count) email change\(operations.count == 1 ? "" : "s") ready for confirmation. Nothing has changed yet.",
+                    operations: operations,
+                    suggestions: ["Open my inbox", "Which emails need my attention?"])
+    }
 
     private func keywordSearch(_ subject: String, context: inout AgentContext) -> Turn {
         let needle = subject.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -798,7 +1269,7 @@ public final class AgentEngine {
         · show my recent meetings — open, summarize or play each one
         · summarize yesterday's meeting — decisions, action items and timestamps
         · what tasks came out of it — cross-referenced with real tasks
-        · create task buy milk @tomorrow — then confirm the change
+        · create a reminder to call Sarah tomorrow at 5pm — applied immediately
         """,
              suggestions: ["What's on my todo?", "Show my recent meetings",
                            "Find my last recording", "Summarize yesterday's meeting"])

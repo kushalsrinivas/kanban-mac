@@ -65,12 +65,19 @@ final class AgentSession {
 
     /// Raised when task data changed, so the app can refresh.
     var onTasksChanged: ((Int) -> Void)?
+    /// Raised when the agent applied a mail change.
+    var onEmailChanged: ((Int) -> Void)?
     /// Raised after a scheduled meeting lands, so the app can flash a confirmation.
     var onScheduledMeetingCreated: ((ScheduledMeeting) -> Void)?
     /// Performs a move the app already knows how to make.
     var onNavigate: ((AgentNavigation) -> Void)?
+    /// A dated agent write should also arm the local notification for its due time.
+    var onReminderScheduled: (() -> Void)?
     /// Read-only events from the system calendars, supplied by AppModel.
     var externalScheduledMeetings: (() -> [ScheduledMeeting])?
+    /// The local Gmail cache and the write executor, supplied by AppModel.
+    var gmail: GmailDataSource?
+    var gmailActions: GmailActionExecutor?
 
     init(store: LocalStore, client: APIClient, settings: AppSettings, sync: SyncEngine,
          model: AgentModelProvider? = nil, requestTimeout: TimeInterval = 60) {
@@ -213,7 +220,12 @@ final class AgentSession {
             var applied: [AgentAction] = []
             var tasksChanged = false
 
-            if turn.fallback {
+            if turn.fallback, context.lastFocus == .email {
+                // Email stays local. If the deterministic mail tools missed, say so
+                // rather than sending the prompt (and potentially quoted mail) to a
+                // third-party model.
+                reply = "I can search your local mail, summarize a conversation, extract commitments or draft a reply — all on this Mac. Try “find the email about…”, “summarize this conversation” or “which emails need my attention?”."
+            } else if turn.fallback {
                 stage = .processing("model")
                 updatePlaceholder(placeholderID) { $0.stage = .processing("model") }
                 let outcome = try await freeFormAnswer(prompt, prior: prior) { [weak self] text in
@@ -237,8 +249,30 @@ final class AgentSession {
 
             if let navigation = turn.navigation { onNavigate?(navigation) }
 
+            // Safe board writes apply now. Delete and archive stay in PENDING OPS:
+            // "create a todo for tomorrow" should not need a second click, but
+            // "delete the board" still does.
+            var locallyApplied: [AgentAction] = []
+            var reminderScheduled = false
             for operation in operations {
-                if self.operations[operation.id] == nil {
+                guard self.operations[operation.id] == nil else { continue }
+                if settings.agentAutoApplyWrites && operation.isSafeLocalWrite {
+                    do {
+                        try apply(operation)
+                        locallyApplied.append(operation.action)
+                        tasksChanged = true
+                        if operation.due != nil {
+                            reminderScheduled = true
+                        }
+                        messages.append(Message(kind: .applied, text: operation.summary))
+                    } catch {
+                        self.operations[operation.id] = operation
+                        pending.append(operation.action)
+                        messages.append(Message(
+                            kind: .failure,
+                            text: "\(operation.summary): \(error.localizedDescription)"))
+                    }
+                } else {
                     self.operations[operation.id] = operation
                     pending.append(operation.action)
                 }
@@ -252,15 +286,26 @@ final class AgentSession {
                 messages.append(Message(kind: .applied, text: action.summary))
             }
 
-            if tasksChanged || !applied.isEmpty {
+            let changeCount = applied.count + locallyApplied.count
+            if tasksChanged || changeCount > 0 {
                 await sync.pull()
-                onTasksChanged?(max(1, applied.count))
+                onTasksChanged?(max(1, changeCount))
+            }
+            if reminderScheduled {
+                onReminderScheduled?()
             }
 
             let finalReply = reply.trimmingCharacters(in: .whitespacesAndNewlines)
             let finalText: String
             if !finalReply.isEmpty {
                 finalText = finalReply
+            } else if !locallyApplied.isEmpty {
+                let titles = locallyApplied.map {
+                    $0.summary.replacingOccurrences(of: "\n", with: " · ")
+                }
+                finalText = locallyApplied.count == 1
+                    ? "Done — \(titles[0])"
+                    : "Done — \(locallyApplied.count) changes applied."
             } else if !artifacts.isEmpty {
                 finalText = ""
             } else if pending.isEmpty {
@@ -334,7 +379,8 @@ final class AgentSession {
         AgentEngine(store: store, remotePlayback: settings.backendIsConfigured,
                     externalScheduledMeetings: { [weak self] in
                         self?.externalScheduledMeetings?() ?? []
-                    })
+                    },
+                    gmail: gmail)
     }
 
     private func mergedScheduledMeetings() -> [ScheduledMeeting] {
@@ -461,7 +507,11 @@ final class AgentSession {
         do {
             try apply(operation)
             messages.append(Message(kind: .applied, text: operation.summary))
-            onTasksChanged?(1)
+            if operation.isEmailOperation {
+                onEmailChanged?(1)
+            } else {
+                onTasksChanged?(1)
+            }
             logger.debug("agent applied \(operation.kind.rawValue, privacy: .public)")
         } catch {
             // A failed write is not silently dropped: the user can retry it from the
@@ -476,7 +526,8 @@ final class AgentSession {
 
     private func apply(_ operation: AgentOperation) throws {
         try AgentExecutor.apply(operation, store: store,
-                                syncEnabled: settings.backendIsConfigured)
+                                syncEnabled: settings.backendIsConfigured,
+                                gmail: gmailActions)
     }
 
     private func executeScheduled(_ draft: ScheduledMeetingDraft,
@@ -599,6 +650,13 @@ final class AgentSession {
             await sync.pull()
             onTasksChanged?((response.appliedActions ?? []).count)
         }
+    }
+
+    /// The Mail view tells the agent what is selected, so "this email" resolves
+    /// after a manual click as well as after an agent turn.
+    func focusEmail(accountID: UUID, threadID: String) {
+        context.focus(email: AgentContext.EmailRef(accountID: accountID,
+                                                   threadID: threadID))
     }
 
     // MARK: Proposals from artifact cards

@@ -141,7 +141,7 @@ struct AgentConsoleView: View {
                 Text("Ask your workspace.")
                     .font(Theme.display(18))
                     .foregroundStyle(theme.ink)
-                Text("Answers come from your real board and meetings. Nothing is invented and nothing is changed without confirmation.")
+                Text("Answers come from your real board and meetings. Safe changes apply immediately; delete and archive ask first.")
                     .font(Theme.body)
                     .foregroundStyle(theme.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -284,6 +284,7 @@ private struct CalendarDetailView: View {
                 actions
                 people
                 briefBody
+                RelatedEmailSection(scheduled: meeting)
             }
             .padding(.bottom, 20)
         }

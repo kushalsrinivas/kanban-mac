@@ -8,6 +8,8 @@ public enum AgentNavigation: Equatable, Sendable {
     case meeting(UUID, focus: MeetingFocus?)
     case task(UUID)
     case calendar(UUID?)
+    case mail(accountID: UUID?, threadID: String?)
+    case mailDraft(UUID)
     case recorder
     case board
 }
@@ -118,6 +120,13 @@ public enum AgentScheduledSelector: Equatable, Sendable {
     case query(String)
 }
 
+public enum AgentEmailSelector: Equatable, Sendable {
+    case current
+    case ordinal(Int)
+    case query(String)
+    case id(accountID: UUID, threadID: String)
+}
+
 // MARK: - Intent
 
 public enum AgentIntent: Equatable, Sendable {
@@ -137,6 +146,22 @@ public enum AgentIntent: Equatable, Sendable {
     case openMeeting(AgentMeetingSelector)
     case openTask(AgentTaskSelector)
     case openRecorder
+    case openMail
+    case emailUnread
+    case emailAttention
+    case emailSummarize(AgentEmailSelector)
+    case emailConversation(String)
+    case emailCommitments(String?)
+    case emailSearch(GmailQuery)
+    case emailOpen(AgentEmailSelector)
+    case emailDraftReply(AgentEmailSelector, all: Bool)
+    case emailCompose(to: String?, subject: String, body: String?)
+    case emailFollowUp(AgentMeetingSelector)
+    case emailArchive(AgentEmailSelector?)
+    case emailTrash(AgentEmailSelector?)
+    case emailMarkRead(AgentEmailSelector?, read: Bool)
+    case emailLabel(AgentEmailSelector?, labels: [String], add: Bool)
+    case emailSuggestLabels(AgentEmailSelector)
     case createTask(title: String, notes: String?, due: String?,
                     priority: Priority?, status: TaskStatus?, tags: [String])
     case renameTask(AgentTaskSelector, title: String)
@@ -147,7 +172,22 @@ public enum AgentIntent: Equatable, Sendable {
     case moveTask(AgentTaskSelector, TaskStatus)
     case archiveTask(AgentTaskSelector)
     case deleteTask(AgentTaskSelector)
+    /// Natural-language prose the deterministic parser should not try to outguess.
+    /// The model can turn it into several validated operations.
+    case askModel(String)
     case keywordSearch(String)
+
+    public var isEmailIntent: Bool {
+        switch self {
+        case .openMail, .emailUnread, .emailAttention, .emailSummarize,
+             .emailConversation, .emailCommitments, .emailSearch, .emailOpen,
+             .emailDraftReply, .emailCompose, .emailFollowUp, .emailArchive,
+             .emailTrash, .emailMarkRead, .emailLabel, .emailSuggestLabels:
+            return true
+        default:
+            return false
+        }
+    }
 
     /// True when the parser could not place the sentence at all. The session may
     /// then ask a model; if there is no model, the console shows its empty state.
@@ -194,6 +234,13 @@ public enum AgentPlanner {
         }
         if isScheduledList(text) { return .scheduledMeetingList }
 
+        // Mail is answered from the local Gmail cache. These phrases are checked
+        // before "summary"/"follow-up"/"delete" so an email request is never
+        // mistaken for a meeting or task action.
+        if let email = GmailAgentPlanner.plan(raw, context: context, now: now) {
+            return email
+        }
+
         if isActionItems(text) {
             return .actionItems(meetingReference(text, context: context, allowNone: true),
                                 window: window(in: text))
@@ -216,7 +263,11 @@ public enum AgentPlanner {
         if isOpenMeeting(text) {
             return .openMeeting(meetingReference(text, context: context, defaultToLatest: true) ?? .latest)
         }
-        if let intent = writeIntent(raw, context: context) { return intent }
+        // Long imperative prose is an LLM-shaped request, not a regex-shaped one:
+        // "add these todos … one is X secondly Y then Z". Let the model decompose it
+        // into multiple validated create_task actions; short commands stay local.
+        if isComplexWriteRequest(text) { return .askModel(raw) }
+        if let intent = writeIntent(raw, context: context, now: now) { return intent }
 
         if isMeetingList(text) {
             return .meetingList(meetingFilter(text, context: context))
@@ -294,6 +345,14 @@ public enum AgentPlanner {
             case .move(let status): return .moveTask(.ordinal(index), status)
             }
         }
+        if context.lastFocus == .email {
+            if index == -1, let last = context.emailRefs.last {
+                return .emailOpen(.id(accountID: last.accountID, threadID: last.threadID))
+            }
+            if index > 0, index <= context.emailRefs.count {
+                return .emailOpen(.ordinal(index))
+            }
+        }
         return nil
     }
 
@@ -308,7 +367,7 @@ public enum AgentPlanner {
         guard matches(#"^(?:schedule|book|set up|add|create|put)\b.*\b(meeting|call|sync|1:1)\b"#, text) != nil else {
             return false
         }
-        return !has(text, ["task", "todo"])
+        return !has(text, ["task", "todo", "remind", "reminder"])
     }
 
     private static func isScheduledBrief(_ text: String) -> Bool {
@@ -412,21 +471,45 @@ public enum AgentPlanner {
 
     // MARK: Write commands
 
-    private static func writeIntent(_ raw: String, context: AgentContext) -> AgentIntent? {
+    /// A multi-clause instruction deserves the model. The threshold keeps ordinary
+    /// one-line commands deterministic while a brain dump goes to Gemini.
+    private static func isComplexWriteRequest(_ text: String) -> Bool {
+        let words = text.split(whereSeparator: { $0 == " " }).count
+        guard words >= 16 else { return false }
+        let openers = ["add ", "create ", "make ", "remind ", "note to self",
+                       "put ", "plan ", "i need to", "i have to", "we need to",
+                       "i want to"]
+        return openers.contains { text.hasPrefix($0) }
+    }
+
+    private static func writeIntent(_ raw: String, context: AgentContext,
+                                     now: Date) -> AgentIntent? {
         let text = normalize(raw)
         let original = raw.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+
+
         if let groups = matches("^(?:create|add|make)\\s+(?:a\\s+|an\\s+|the\\s+)?(?:new\\s+)?(?:task|todo|item)(?:\\s*[:\\-]\\s*|\\s+)(.+)$", original),
-           let intent = createTask(groups[1]) {
+           let intent = createTask(groups[1], now: now) {
             return intent
         }
         if let groups = matches("^(?:create|add)\\s+(.+?)\\s+(?:as|to)\\s+(?:a\\s+)?(?:task|todo)$", original),
-           let intent = createTask(groups[1]) {
+           let intent = createTask(groups[1], now: now) {
             return intent
         }
-        if let groups = matches("^remind me to\\s+(.+)$", original), let intent = createTask(groups[1]) {
+        if let groups = matches("^remind me to\\s+(.+)$", original),
+           let intent = createTask(groups[1], now: now) {
             return intent
         }
-        if let groups = matches("^note to self[:\\s]+(.+)$", original), let intent = createTask(groups[1]) {
+        if let groups = matches("^(?:create|add|set)\\s+(?:a\\s+|an\\s+)?reminder(?:\\s+to|\\s*[:\\-]\\s*|\\s+)(.+)$", original),
+           let intent = createTask(groups[1], now: now) {
+            return intent
+        }
+        if let groups = matches("^remind me about\\s+(.+)$", original),
+           let intent = createTask(groups[1], now: now) {
+            return intent
+        }
+        if let groups = matches("^note to self[:\\s]+(.+)$", original),
+           let intent = createTask(groups[1], now: now) {
             return intent
         }
 
@@ -469,10 +552,10 @@ public enum AgentPlanner {
         return nil
     }
 
-    private static func createTask(_ body: String) -> AgentIntent? {
+    private static func createTask(_ body: String, now: Date) -> AgentIntent? {
         var text = body.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.hasPrefix("to ") { text = String(text.dropFirst(3)) }
-        let parsed = QuickParse.parse(text)
+        let parsed = QuickParse.parse(text, now: now)
         let title = parsed.title.trimmingCharacters(in: .whitespacesAndNewlines)
         // "create a task from the meeting" is a request to extract action items, not
         // to create a task literally named "from the meeting".

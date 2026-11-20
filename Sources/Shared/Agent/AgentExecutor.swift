@@ -8,7 +8,8 @@ public enum AgentExecutor {
 
     @MainActor
     public static func apply(_ operation: AgentOperation, store: LocalStore,
-                             syncEnabled: Bool) throws {
+                             syncEnabled: Bool,
+                             gmail: GmailActionExecutor? = nil) throws {
         let service = TaskService(store: store, syncEnabled: syncEnabled)
         switch operation.kind {
         case .createTask:
@@ -57,6 +58,50 @@ public enum AgentExecutor {
         case .deleteTask:
             guard let taskID = operation.taskID else { throw APIError.badRequest("task id is required") }
             _ = try service.delete(taskID, hard: true)
+
+        case .createEmailDraft:
+            guard let gmail else { throw APIError.badRequest("Gmail is not connected.") }
+            guard let draft = operation.emailDraft else {
+                throw APIError.badRequest("draft is required")
+            }
+            try gmail.emailCreateDraft(draft)
+
+        case .labelEmail:
+            guard let gmail, let accountID = operation.emailAccountID,
+                  let threadIDs = operation.emailThreadIDs,
+                  let labels = operation.emailLabels else {
+                throw APIError.badRequest("email target is required")
+            }
+            let add = operation.emailAddLabel ?? true
+            try gmail.emailSetLabels(accountID: accountID, threadIDs: threadIDs,
+                                     add: add ? labels : [],
+                                     remove: add ? [] : labels)
+
+        case .archiveEmail:
+            guard let gmail, let accountID = operation.emailAccountID,
+                  let threadIDs = operation.emailThreadIDs else {
+                throw APIError.badRequest("email target is required")
+            }
+            try gmail.emailArchive(accountID: accountID, threadIDs: threadIDs)
+
+        case .trashEmail:
+            guard let gmail, let accountID = operation.emailAccountID,
+                  let threadIDs = operation.emailThreadIDs else {
+                throw APIError.badRequest("email target is required")
+            }
+            try gmail.emailTrash(accountID: accountID, threadIDs: threadIDs)
+
+        case .markEmailRead:
+            guard let gmail, let accountID = operation.emailAccountID,
+                  let threadIDs = operation.emailThreadIDs else {
+                throw APIError.badRequest("email target is required")
+            }
+            // The executor's mail protocol expresses reads as label changes, so a
+            // read is "remove UNREAD" and an unread is "add UNREAD".
+            let read = operation.emailRead ?? true
+            try gmail.emailSetLabels(accountID: accountID, threadIDs: threadIDs,
+                                     add: read ? [] : ["UNREAD"],
+                                     remove: read ? ["UNREAD"] : [])
         }
     }
 }

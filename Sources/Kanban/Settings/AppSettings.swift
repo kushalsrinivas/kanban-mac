@@ -48,6 +48,9 @@ final class AppSettings {
     var serverURL: String { didSet { set(serverURL, "serverURL") } }
     var requestTimeout: Double { didSet { set(requestTimeout, "requestTimeout") } }
     var confirmDestructiveAgentActions: Bool { didSet { set(confirmDestructiveAgentActions, "confirmDestructive") } }
+    /// Create/update/move/complete writes apply as soon as the agent resolves them.
+    /// Archive and delete always remain proposals.
+    var agentAutoApplyWrites: Bool { didSet { set(agentAutoApplyWrites, "agentAutoApplyWrites") } }
 
     // Local AI
     /// Gemini is called directly from the app for analysis and the agent.
@@ -59,6 +62,13 @@ final class AppSettings {
     var transcriptionQuant: String { didSet { set(transcriptionQuant, "transcriptionQuant") } }
     /// Comma or newline separated terms passed to the model as vocabulary.
     var transcriptionVocabulary: String { didSet { set(transcriptionVocabulary, "transcriptionVocabulary") } }
+
+    // Gmail (client-side only). The client ID is public; the client secret, when a
+    // Google desktop client provides one, stays in the Keychain.
+    var gmailClientID: String { didSet { set(gmailClientID, "gmailClientID") } }
+    var gmailSyncOnLaunch: Bool { didSet { set(gmailSyncOnLaunch, "gmailSyncOnLaunch") } }
+    var gmailInitialSyncLimit: Int { didSet { set(gmailInitialSyncLimit, "gmailInitialSyncLimit") } }
+    var gmailSemanticSearch: Bool { didSet { set(gmailSemanticSearch, "gmailSemanticSearch") } }
 
     /// Global ⌃⌥Space dictation: speak, get the transcript on the clipboard.
     var dictationEnabled: Bool { didSet { set(dictationEnabled, "dictationEnabled") } }
@@ -122,6 +132,48 @@ final class AppSettings {
 
     @ObservationIgnored private var loadedGeminiKey: String?
 
+    /// The OAuth client secret, when the Google project supplies one. Never in
+    /// UserDefaults and never in the source tree.
+    var gmailClientSecret: String {
+        get {
+            if loadedGmailSecret == nil {
+                loadedGmailSecret = GmailKeychain().loadClientSecret() ?? ""
+            }
+            return loadedGmailSecret ?? ""
+        }
+        set { commitGmailClientSecret(newValue) }
+    }
+
+    private(set) var gmailClientSecretWriteFailed = false
+
+    @discardableResult
+    func commitGmailClientSecret(_ value: String) -> Bool {
+        loadedGmailSecret = value
+        let store = GmailKeychain()
+        if value.isEmpty {
+            store.saveClientSecret("")
+            gmailClientSecretWriteFailed = false
+            return true
+        }
+        store.saveClientSecret(value)
+        // A read-back distinguishes a silent Keychain failure from success.
+        let stored = store.loadClientSecret() == value
+        gmailClientSecretWriteFailed = !stored
+        return stored
+    }
+
+    @ObservationIgnored private var loadedGmailSecret: String?
+
+    /// The Google desktop client ID and optional secret, as one value.
+    var gmailOAuthConfig: GmailOAuthConfig {
+        GmailOAuthConfig(clientID: gmailClientID,
+                         clientSecret: gmailClientSecret.isEmpty ? nil : gmailClientSecret)
+    }
+
+    var hasGmailClient: Bool {
+        GmailOAuthConfig(clientID: gmailClientID).isValid
+    }
+
     /// True when meeting analysis and the local agent can run.
     var hasGeminiKey: Bool {
         !geminiAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -176,10 +228,15 @@ final class AppSettings {
         serverURL = string("serverURL", "")
         requestTimeout = double("requestTimeout", 20)
         confirmDestructiveAgentActions = bool("confirmDestructive", true)
+        agentAutoApplyWrites = bool("agentAutoApplyWrites", true)
         geminiModel = string("geminiModel", "gemini-2.5-flash")
         transcriptionModelID = string("transcriptionModelID", "whisper-small")
         transcriptionQuant = string("transcriptionQuant", "")
         transcriptionVocabulary = string("transcriptionVocabulary", "")
+        gmailClientID = string("gmailClientID", "")
+        gmailSyncOnLaunch = bool("gmailSyncOnLaunch", true)
+        gmailInitialSyncLimit = int("gmailInitialSyncLimit", 500)
+        gmailSemanticSearch = bool("gmailSemanticSearch", true)
         dictationEnabled = bool("dictationEnabled", true)
         captureMicrophone = bool("captureMicrophone", true)
         // System audio used to default on. Reset it once for anyone carrying the old

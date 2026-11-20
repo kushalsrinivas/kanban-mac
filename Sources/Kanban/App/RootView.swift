@@ -34,6 +34,7 @@ struct RootView: View {
                         switch app.section {
                         case .tasks: tasksSection.transition(.opacity)
                         case .meetings: MeetingsView().padding(.top, 10).transition(.opacity)
+                        case .mail: MailView().padding(.top, 10).transition(.opacity)
                         case .agent: AgentConsoleView(focus: $focus).padding(.top, 10).transition(.opacity)
                         case .calendar: CalendarView().padding(.top, 10).transition(.opacity)
                         }
@@ -204,6 +205,7 @@ private struct TitleBar: View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(app.section == .tasks ? "TASK SYSTEM"
                  : app.section == .meetings ? "MEETINGS"
+                 : app.section == .mail ? "MAIL"
                  : app.section == .agent ? "AGENT" : "MEET")
                 .font(Theme.display(24, weight: .medium))
                 .tracking(-0.2)
@@ -345,7 +347,7 @@ private struct Sidebar: View {
 
     /// Deliberately explicit: MEET belongs beside the recordings it summarises, and
     /// the agent stays last as the conversational surface.
-    private let order: [AppModel.Section] = [.tasks, .meetings, .calendar, .agent]
+    private let order: [AppModel.Section] = [.tasks, .meetings, .mail, .calendar, .agent]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -474,6 +476,9 @@ private struct Sidebar: View {
         case .meetings:
             let suggestions = app.openSuggestionCount
             return suggestions > 0 ? "\(suggestions)" : nil
+        case .mail:
+            let unread = app.mail.counts.inboxUnread
+            return unread > 0 ? String(format: "%02d", unread) : nil
         case .calendar:
             let upcoming = app.upcomingMeetings().count
             return upcoming > 0 ? String(format: "%02d", upcoming) : nil
@@ -491,6 +496,8 @@ private struct Sidebar: View {
             return app.openSuggestionCount > 0
         case .calendar:
             return !app.store.overdueCommitments.isEmpty
+        case .mail:
+            return false
         default:
             return false
         }
@@ -556,6 +563,7 @@ private struct SidebarItem: View {
         switch section {
         case .tasks: return "rectangle.split.3x1"
         case .meetings: return "waveform"
+        case .mail: return "envelope"
         case .calendar: return "calendar.badge.clock"
         case .agent: return "terminal"
         }
@@ -566,6 +574,7 @@ private struct SidebarItem: View {
         switch section {
         case .tasks: return "\(app.store.counts().open) open task\(app.store.counts().open == 1 ? "" : "s")\(count)"
         case .meetings: return "Meetings and recordings\(count)"
+        case .mail: return "Gmail, stored locally\(count)"
         case .calendar: return "Briefs, commitments, memory and automation\(count)"
         case .agent: return "Agent console\(count)"
         }
@@ -622,6 +631,7 @@ private struct StatusFooter: View {
             MicroLabel("⏎ OPEN")
             MicroLabel("⌘1-4 COLUMN")
             MicroLabel("⌘R RECORD")
+            MicroLabel("⌘⇧M MAIL")
             MicroLabel("⌘⇧A AGENT")
             MicroLabel("⌘⌥4 MEET")
             Spacer(minLength: 0)

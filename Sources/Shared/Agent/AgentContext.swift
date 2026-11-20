@@ -7,7 +7,19 @@ import Foundation
 /// "it" and "its recording" without asking the user to repeat themselves.
 public struct AgentContext: Equatable, Sendable {
     /// What "it" means right now.
-    public enum Focus: String, Equatable, Sendable { case meeting, task }
+    public enum Focus: String, Equatable, Sendable { case meeting, task, email }
+
+    public struct EmailRef: Hashable, Sendable {
+        public var accountID: UUID
+        public var threadID: String
+        public var messageID: String?
+
+        public init(accountID: UUID, threadID: String, messageID: String? = nil) {
+            self.accountID = accountID
+            self.threadID = threadID
+            self.messageID = messageID
+        }
+    }
 
     /// The question the assistant last asked, so a bare "the first one" answers it.
     public enum PendingQuery: Equatable, Sendable {
@@ -27,6 +39,9 @@ public struct AgentContext: Equatable, Sendable {
     public private(set) var lastTaskID: UUID?
     public private(set) var lastScheduledMeetingID: UUID?
     public private(set) var lastFocus: Focus?
+    /// The last email list the user was shown, and the one the turn was about.
+    public private(set) var emailRefs: [EmailRef] = []
+    public private(set) var lastEmail: EmailRef?
     /// The topic of the last retrieval ("onboarding"), reused by a bare follow-up.
     public private(set) var lastTopic: String?
 
@@ -76,6 +91,24 @@ public struct AgentContext: Equatable, Sendable {
 
     public mutating func focus(scheduledMeeting: UUID) {
         lastScheduledMeetingID = scheduledMeeting
+        pendingQuery = nil
+        pendingTaskAction = nil
+    }
+
+    public mutating func record(emails: [EmailRef], last: EmailRef? = nil,
+                                topic: String? = nil) {
+        emailRefs = emails
+        lastEmail = last ?? emails.first
+        if !emails.isEmpty || last != nil { lastFocus = .email }
+        if let topic, !topic.isEmpty { lastTopic = topic }
+        pendingQuery = nil
+        pendingTaskAction = nil
+    }
+
+    public mutating func focus(email: EmailRef) {
+        lastEmail = email
+        if emailRefs.isEmpty { emailRefs = [email] }
+        lastFocus = .email
         pendingQuery = nil
         pendingTaskAction = nil
     }

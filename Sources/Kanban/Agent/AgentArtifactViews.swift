@@ -69,6 +69,22 @@ struct AgentArtifactRegistry {
             guard case .scheduledBrief(let value) = artifact.payload else { return AnyView(EmptyView()) }
             return AnyView(ScheduledBriefCard(value: value))
         }
+        registry.register(.emailList) { artifact in
+            guard case .emailList(let list) = artifact.payload else { return AnyView(EmptyView()) }
+            return AnyView(EmailListCard(list: list))
+        }
+        registry.register(.emailThread) { artifact in
+            guard case .emailThread(let value) = artifact.payload else { return AnyView(EmptyView()) }
+            return AnyView(EmailThreadArtifactCard(value: value))
+        }
+        registry.register(.emailCommitments) { artifact in
+            guard case .emailCommitments(let value) = artifact.payload else { return AnyView(EmptyView()) }
+            return AnyView(EmailCommitmentsCard(value: value))
+        }
+        registry.register(.emailDraft) { artifact in
+            guard case .emailDraft(let value) = artifact.payload else { return AnyView(EmptyView()) }
+            return AnyView(EmailDraftCard(value: value))
+        }
         return registry
     }()
 }
@@ -97,7 +113,7 @@ private extension Meeting {
 
 // MARK: - Shared chrome
 
-private struct ArtifactShell<Content: View>: View {
+struct ArtifactShell<Content: View>: View {
     @Environment(\.theme) private var theme
     let kind: AgentArtifactKind
     let title: String
@@ -139,7 +155,7 @@ private struct ArtifactShell<Content: View>: View {
     }
 }
 
-private struct EmptyArtifactRow: View {
+struct EmptyArtifactRow: View {
     @Environment(\.theme) private var theme
     let message: String
 
@@ -155,7 +171,7 @@ private struct EmptyArtifactRow: View {
     }
 }
 
-private struct ArtifactAction: View {
+struct ArtifactAction: View {
     @Environment(\.theme) private var theme
     let label: String
     var emphasised = false
@@ -175,7 +191,7 @@ private struct ArtifactAction: View {
     }
 }
 
-private struct ArtifactDivider: View {
+struct ArtifactDivider: View {
     @Environment(\.theme) private var theme
     var body: some View {
         Rectangle().fill(theme.line.opacity(0.7)).frame(height: Theme.Metric.hairline)

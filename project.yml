@@ -91,6 +91,8 @@ targets:
       - path: Sources/Kanban/Meetings/Recording/MeetingRecorder.swift
       - path: Sources/Kanban/Settings/AppSettings.swift
       - path: Sources/Kanban/Core/Authentication/KeychainStore.swift
+      - path: Sources/Kanban/Gmail/GmailAuthController.swift
+      - path: Sources/Kanban/Gmail/MailModel.swift
       - path: Sources/Kanban/Core/AI/GeminiClient.swift
       - path: Sources/Kanban/Core/AI/LocalAgentPlan.swift
       - path: Sources/Kanban/Core/Networking/APIClient.swift

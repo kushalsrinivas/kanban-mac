@@ -64,6 +64,8 @@ struct KanbanCommands: Commands {
             Divider()
             Button("Ask Agent") { app.section = .agent }
                 .keyboardShortcut("a", modifiers: [.command, .shift])
+            Button("Compose Mail") { app.composeMail() }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
         }
 
         CommandMenu("Go") {
@@ -71,10 +73,12 @@ struct KanbanCommands: Commands {
                 .keyboardShortcut("1", modifiers: [.command, .option])
             Button("Meetings") { app.section = .meetings }
                 .keyboardShortcut("2", modifiers: [.command, .option])
-            Button("Agent") { app.section = .agent }
+            Button("Mail") { app.section = .mail }
                 .keyboardShortcut("3", modifiers: [.command, .option])
             Button("Meet") { app.section = .calendar }
                 .keyboardShortcut("4", modifiers: [.command, .option])
+            Button("Agent") { app.section = .agent }
+                .keyboardShortcut("5", modifiers: [.command, .option])
             Divider()
             Button("Sync Now") { Task { await app.connect() } }
                 .keyboardShortcut("r", modifiers: [.command, .shift])

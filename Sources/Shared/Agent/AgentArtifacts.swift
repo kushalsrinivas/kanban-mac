@@ -19,6 +19,10 @@ public enum AgentArtifactKind: String, CaseIterable, Sendable, Hashable {
     case scheduledMeetingList
     case scheduledMeeting
     case scheduledBrief
+    case emailList
+    case emailThread
+    case emailCommitments
+    case emailDraft
 
     public var label: String {
         switch self {
@@ -32,6 +36,10 @@ public enum AgentArtifactKind: String, CaseIterable, Sendable, Hashable {
         case .scheduledMeetingList: return "SCHEDULE"
         case .scheduledMeeting: return "SCHEDULED"
         case .scheduledBrief: return "BRIEF"
+        case .emailList: return "EMAIL"
+        case .emailThread: return "CONVERSATION"
+        case .emailCommitments: return "COMMITMENTS"
+        case .emailDraft: return "DRAFT"
         }
     }
 }
@@ -231,6 +239,90 @@ public struct ScheduledBriefArtifact: Equatable, Sendable {
     }
 }
 
+// MARK: - Mail
+
+/// One conversation row in an agent answer. `reason` explains why a mail was
+/// surfaced; it is nil for a plain search result.
+public struct EmailThreadCard: Identifiable, Equatable, Sendable {
+    public var accountID: UUID
+    public var accountEmail: String
+    public var thread: GmailThreadSummary
+    public var reason: String?
+
+    public var id: String { "\(accountID.uuidString)|\(thread.id)" }
+
+    public init(accountID: UUID, accountEmail: String,
+                thread: GmailThreadSummary, reason: String? = nil) {
+        self.accountID = accountID
+        self.accountEmail = accountEmail
+        self.thread = thread
+        self.reason = reason
+    }
+}
+
+public struct EmailListArtifact: Equatable, Sendable {
+    public var title: String
+    public var cards: [EmailThreadCard]
+    public var note: String?
+    public var emptyMessage: String
+
+    public init(title: String, cards: [EmailThreadCard], note: String? = nil,
+                emptyMessage: String = "No emails match.") {
+        self.title = title
+        self.cards = cards
+        self.note = note
+        self.emptyMessage = emptyMessage
+    }
+}
+
+public struct EmailThreadArtifact: Equatable, Sendable {
+    public var accountID: UUID
+    public var accountEmail: String
+    public var thread: GmailThread
+    public var insight: String?
+    public var commitments: [GmailEmailCommitment]
+    public var note: String?
+
+    public init(accountID: UUID, accountEmail: String, thread: GmailThread,
+                insight: String? = nil, commitments: [GmailEmailCommitment] = [],
+                note: String? = nil) {
+        self.accountID = accountID
+        self.accountEmail = accountEmail
+        self.thread = thread
+        self.insight = insight
+        self.commitments = commitments
+        self.note = note
+    }
+}
+
+public struct EmailCommitmentsArtifact: Equatable, Sendable {
+    public var title: String
+    public var commitments: [GmailEmailCommitment]
+    public var note: String?
+    public var emptyMessage: String
+
+    public init(title: String, commitments: [GmailEmailCommitment],
+                note: String? = nil,
+                emptyMessage: String = "No commitments found in email.") {
+        self.title = title
+        self.commitments = commitments
+        self.note = note
+        self.emptyMessage = emptyMessage
+    }
+}
+
+public struct EmailDraftArtifact: Equatable, Sendable {
+    public var accountEmail: String
+    public var draft: GmailDraft
+    public var note: String?
+
+    public init(accountEmail: String, draft: GmailDraft, note: String? = nil) {
+        self.accountEmail = accountEmail
+        self.draft = draft
+        self.note = note
+    }
+}
+
 // MARK: - Artifact
 
 public struct AgentArtifact: Identifiable, Equatable, Sendable {
@@ -253,6 +345,10 @@ public struct AgentArtifact: Identifiable, Equatable, Sendable {
         case scheduledMeetingList(ScheduledMeetingListArtifact)
         case scheduledMeeting(ScheduledMeetingArtifact)
         case scheduledBrief(ScheduledBriefArtifact)
+        case emailList(EmailListArtifact)
+        case emailThread(EmailThreadArtifact)
+        case emailCommitments(EmailCommitmentsArtifact)
+        case emailDraft(EmailDraftArtifact)
 
         public var kind: AgentArtifactKind {
             switch self {
@@ -266,6 +362,10 @@ public struct AgentArtifact: Identifiable, Equatable, Sendable {
             case .scheduledMeetingList: return .scheduledMeetingList
             case .scheduledMeeting: return .scheduledMeeting
             case .scheduledBrief: return .scheduledBrief
+            case .emailList: return .emailList
+            case .emailThread: return .emailThread
+            case .emailCommitments: return .emailCommitments
+            case .emailDraft: return .emailDraft
             }
         }
 
@@ -281,6 +381,11 @@ public struct AgentArtifact: Identifiable, Equatable, Sendable {
             case .scheduledMeetingList(let list): return list.title
             case .scheduledMeeting(let meeting): return meeting.meeting.title
             case .scheduledBrief(let brief): return brief.brief.scheduled.title
+            case .emailList(let list): return list.title
+            case .emailThread(let thread): return thread.thread.summary.displaySubject
+            case .emailCommitments(let items): return items.title
+            case .emailDraft(let draft): return draft.draft.subject.isEmpty
+                ? "New email" : draft.draft.subject
             }
         }
     }
@@ -301,6 +406,10 @@ public struct AgentArtifact: Identifiable, Equatable, Sendable {
         case .scheduledMeetingList: return nil
         case .scheduledMeeting: return nil
         case .scheduledBrief: return nil
+        case .emailList: return nil
+        case .emailThread: return nil
+        case .emailCommitments: return nil
+        case .emailDraft: return nil
         }
     }
 
@@ -399,5 +508,41 @@ public enum AgentArtifactBuilder {
         }
         return AgentArtifact(.participants(ParticipantsArtifact(
             meeting: meeting, participants: cards)))
+    }
+
+    // MARK: Mail
+
+    public static func emails(_ threads: [GmailThreadSummary], accounts: [UUID: GmailAccount],
+                              title: String, reasons: [String: String]? = nil,
+                              note: String? = nil) -> AgentArtifact {
+        let cards = threads.compactMap { thread -> EmailThreadCard? in
+            guard let account = accounts[thread.accountID] else { return nil }
+            return EmailThreadCard(accountID: thread.accountID, accountEmail: account.email,
+                                   thread: thread, reason: reasons?[thread.id])
+        }
+        return AgentArtifact(.emailList(EmailListArtifact(
+            title: title, cards: cards, note: note,
+            emptyMessage: "No emails match. Connect Gmail in Settings or try another search.")))
+    }
+
+    public static func emailThread(_ thread: GmailThread, account: GmailAccount,
+                                   insight: String? = nil,
+                                   commitments: [GmailEmailCommitment] = [],
+                                   note: String? = nil) -> AgentArtifact {
+        AgentArtifact(.emailThread(EmailThreadArtifact(
+            accountID: account.id, accountEmail: account.email, thread: thread,
+            insight: insight, commitments: commitments, note: note)))
+    }
+
+    public static func emailCommitments(_ items: [GmailEmailCommitment],
+                                        title: String, note: String? = nil) -> AgentArtifact {
+        AgentArtifact(.emailCommitments(EmailCommitmentsArtifact(
+            title: title, commitments: items, note: note)))
+    }
+
+    public static func emailDraft(_ draft: GmailDraft, accountEmail: String,
+                                  note: String? = nil) -> AgentArtifact {
+        AgentArtifact(.emailDraft(EmailDraftArtifact(
+            accountEmail: accountEmail, draft: draft, note: note)))
     }
 }

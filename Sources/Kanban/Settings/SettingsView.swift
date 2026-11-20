@@ -20,6 +20,9 @@ struct SettingsView: View {
     @State private var geminiKeyDraft = ""
     @State private var geminiKeyStored = false
     @FocusState private var geminiKeyFocused: Bool
+    @State private var gmailSecretDraft = ""
+    @State private var showingGmailConnect = false
+    @State private var disconnectingGmail: GmailAccount?
 
     private var archivedCount: Int { app.store.tasks.filter(\.isArchived).count }
 
@@ -37,6 +40,7 @@ struct SettingsView: View {
                 tasksBlock(bindable)
                 localAIBlock(bindable)
                 dictationBlock(bindable)
+                gmailBlock(bindable)
                 backendBlock(bindable)
                 meetingsBlock(bindable)
                 notificationsBlock(bindable)
@@ -55,10 +59,31 @@ struct SettingsView: View {
             apiKeyStored = !apiKeyDraft.isEmpty
             geminiKeyDraft = app.settings.geminiAPIKey
             geminiKeyStored = !geminiKeyDraft.isEmpty
+            gmailSecretDraft = app.settings.gmailClientSecret
         }
         .onDisappear {
             commitAPIKey()
             commitGeminiKey()
+            if app.settings.gmailClientSecret != gmailSecretDraft {
+                app.settings.commitGmailClientSecret(gmailSecretDraft)
+            }
+        }
+        .sheet(isPresented: $showingGmailConnect) {
+            GmailConnectSheet(model: app.mail).environment(app)
+        }
+        .confirmationDialog("Disconnect \(disconnectingGmail?.email ?? "this account")?",
+                            isPresented: Binding(
+                                get: { disconnectingGmail != nil },
+                                set: { if !$0 { disconnectingGmail = nil } }),
+                            titleVisibility: .visible) {
+            Button("Disconnect & Delete Local Data", role: .destructive) {
+                if let account = disconnectingGmail {
+                    Task { await app.mail.disconnect(account) }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Revokes the refresh token, removes it from the Keychain, and deletes this account's cached mail, drafts and attachments from this Mac.")
         }
         .confirmationDialog("Delete every saved recording?",
                             isPresented: $confirmingRecordingPurge,
@@ -265,6 +290,12 @@ struct SettingsView: View {
                         .foregroundStyle(theme.ink)
                 }
             }
+            row("AUTO-APPLY WRITES") {
+                PillToggle(isOn: app.settings.agentAutoApplyWrites) {
+                    settings.agentAutoApplyWrites.wrappedValue.toggle()
+                }
+            }
+            note("When on, create, update, move and complete take effect immediately. Delete and archive still ask for confirmation.")
             row("CONFIRM DESTRUCTIVE") {
                 PillToggle(isOn: app.settings.confirmDestructiveAgentActions) {
                     settings.confirmDestructiveAgentActions.wrappedValue.toggle()
@@ -350,6 +381,100 @@ struct SettingsView: View {
         }
     }
 
+
+    private func gmailBlock(_ settings: Bindable<AppSettings>) -> some View {
+        block("gmail · local") {
+            row("DISK ENCRYPTION") {
+                HStack(spacing: 8) {
+                    StatusDot(app.mail.fileVaultState == .on ? .on : .alert)
+                    Text(app.mail.fileVaultState.rawValue.uppercased())
+                        .font(Theme.mono(10.5, weight: .medium))
+                        .foregroundStyle(app.mail.fileVaultState == .on
+                                         ? theme.inkSecondary : theme.signal)
+                    Button("RECHECK") { app.mail.refreshStorageSecurity() }
+                        .buttonStyle(PanelButtonStyle(compact: true))
+                    Button("OPEN FILEVAULT") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?FileVault") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    .buttonStyle(PanelButtonStyle(compact: true))
+                }
+            }
+            if let message = app.mail.storageMessage {
+                note(message)
+            }
+            ForEach(app.gmailStore.accounts) { account in
+                row(account.email.uppercased()) {
+                    HStack(spacing: 8) {
+                        if account.syncError != nil {
+                            StatusDot(.alert)
+                        } else {
+                            StatusDot(.on)
+                        }
+                        Text(account.lastSyncAt.map {
+                            "SYNCED \(GmailFormat.listDate($0))"
+                        } ?? "NOT SYNCED")
+                            .font(Theme.mono(9))
+                            .foregroundStyle(theme.inkSecondary)
+                        Button("RECONNECT…") { showingGmailConnect = true }
+                            .buttonStyle(PanelButtonStyle(compact: true))
+                        Button("DISCONNECT…") { disconnectingGmail = account }
+                            .buttonStyle(PanelButtonStyle(compact: true))
+                    }
+                }
+            }
+            row("ACCOUNTS") {
+                HStack(spacing: 8) {
+                    Button("ADD GMAIL ACCOUNT…") { showingGmailConnect = true }
+                        .buttonStyle(PanelButtonStyle(prominent: true, compact: true))
+                    Button("SYNC NOW") {
+                        Task { await app.mail.syncNow() }
+                    }
+                    .buttonStyle(PanelButtonStyle(compact: true))
+                    .disabled(app.gmailStore.accounts.isEmpty || app.mail.isSyncing)
+                }
+            }
+            row("OAUTH CLIENT ID") {
+                field(text: settings.gmailClientID,
+                      placeholder: "…apps.googleusercontent.com")
+            }
+            row("CLIENT SECRET") {
+                HStack(spacing: 8) {
+                    secureField(text: $gmailSecretDraft, placeholder: "optional")
+                    Button("SAVE") {
+                        app.settings.commitGmailClientSecret(gmailSecretDraft)
+                    }
+                    .buttonStyle(PanelButtonStyle(compact: true))
+                    MicroLabel(app.settings.gmailClientSecretWriteFailed
+                               ? "write failed"
+                               : (gmailSecretDraft.isEmpty ? "not set" : "in keychain"))
+                }
+            }
+            row("AUTO SYNC") {
+                PillToggle(isOn: app.settings.gmailSyncOnLaunch) {
+                    settings.gmailSyncOnLaunch.wrappedValue.toggle()
+                }
+            }
+            row("INITIAL HISTORY") {
+                SegmentPicker(selection: Binding(
+                    get: { app.settings.gmailInitialSyncLimit },
+                    set: { settings.gmailInitialSyncLimit.wrappedValue = $0 }), options: [
+                        (200, "200"), (500, "500"), (1000, "1K"), (2000, "2K")
+                    ])
+                .frame(width: 230)
+            }
+            row("SEMANTIC SEARCH") {
+                PillToggle(isOn: app.settings.gmailSemanticSearch) {
+                    settings.gmailSemanticSearch.wrappedValue.toggle()
+                }
+            }
+            if let error = app.mail.sync.lastError {
+                note(error)
+            }
+            note("OAuth uses a loopback redirect with PKCE. Tokens live in the Keychain; mail, attachments, drafts and the search index live in this Mac's SQLite file and its Gmail folder (FileVault protects them at rest). Gmail is contacted directly — never the Work Console VPS or any AI service. The email agent reads the local cache and can only propose changes or save drafts; sending always requires your confirmation.")
+        }
+    }
 
     private func dictationBlock(_ settings: Bindable<AppSettings>) -> some View {
         block("dictation") {

@@ -8,7 +8,7 @@ import Foundation
 /// belongs on the server.
 enum Schema {
 
-    static let version: Int32 = 4
+    static let version: Int32 = 5
 
     static func migrate(_ db: SQLiteDatabase) throws {
         let current = db.userVersion
@@ -17,6 +17,7 @@ enum Schema {
             try createV2(db)
             try createV3(db)
             try createV4(db)
+            try createV5(db)
             db.userVersion = version
             return
         }
@@ -34,6 +35,11 @@ enum Schema {
         if current < 4 {
             try createV4(db)
             db.userVersion = 4
+        }
+
+        if current < 5 {
+            try createV5(db)
+            db.userVersion = 5
         }
 
         // Keep the audit log bounded; this is a personal tool, not an audit system.
@@ -222,6 +228,14 @@ enum Schema {
             );
             CREATE INDEX IF NOT EXISTS idx_local_messages_meeting ON local_messages(meeting_id);
             """)
+    }
+
+    // MARK: v5
+
+    /// Gmail lives entirely on this Mac: accounts, labels, threads, messages,
+    /// attachments, local drafts, the outbox and the local search indexes.
+    private static func createV5(_ db: SQLiteDatabase) throws {
+        try GmailSchema.create(db)
     }
 
     // MARK: v1 -> v2

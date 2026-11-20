@@ -140,6 +140,139 @@ saved recording at once (skipping anything still waiting to upload).
 `AudioCaptureEngine` is a protocol, so chunked streaming can replace file-then-upload
 without touching the meeting flow.
 
+
+## Gmail (entirely client-side)
+
+Mail is a first-class section in the app, next to Tasks, Meetings and Agent. It has
+**no server component**: the Mac talks directly to Gmail, caches everything in the
+same SQLite file, and never sends email content to the Work Console VPS or to an AI
+service.
+
+### Connecting
+
+1. In Google Cloud Console, create (or pick) a project and enable the Gmail API.
+2. Configure the OAuth consent screen and add your account as a test user.
+3. Create Credentials → OAuth client ID → **Desktop app**.
+4. Open Settings → Gmail, paste the client ID (and the client secret if Google shows
+   one), and press CONNECT.
+
+The app opens Google in the default browser, listens on `127.0.0.1` on a random port,
+and completes the installed-app flow with PKCE and a random `state`. The redirect URI
+is loopback only. Refresh and access tokens live in the login Keychain under the app's
+Gmail service; the SQLite file never contains a token. Disconnecting revokes the
+refresh token, removes the Keychain item, and deletes that account's cached messages,
+drafts and attachments.
+
+Scopes are `gmail.modify` and `gmail.send`. No contacts, calendar or Drive scope is
+requested. Multiple accounts are supported; ALL ACCOUNTS is a view, not a shared
+mailbox.
+
+### Encryption at rest
+
+- OAuth tokens, the optional client secret and the local AES-GCM key live in the
+  Keychain, never in SQLite or UserDefaults.
+- Draft subjects, bodies, recipients and attachment metadata are encrypted with
+  AES-GCM before they reach SQLite; attachment files and their legacy plaintext
+  copies are encrypted in place with the same device-local key. Decryption happens
+  only in memory (or a short-lived `0600` file when you ask to reveal an attachment).
+- Message threads and the FTS index stay in SQLite, so the app **requires FileVault**
+  before mail is unlocked. On launch/activation it runs `fdesetup status`; if
+  FileVault is off or cannot be verified, the Mail section is replaced by a lock
+  screen, sync and the agent's mail tools are disabled, and connecting a new account
+  is refused. Enabling FileVault and pressing RECHECK unlocks it.
+- The encryption key is device-local. Resetting the login Keychain makes old local
+  drafts/attachments unreadable; Gmail still holds the server copies.
+
+### Sync and offline
+
+- The first sync fetches the newest N messages (200/500/1K/2K in Settings) and the
+  label list, then stores header, body, thread and attachment metadata.
+- Later syncs use `users.history.list` with the stored `historyId`; a 404/expired
+  cursor triggers one full resync. History pages are walked with `pageToken`.
+- Opening a conversation fetches the full thread on demand if the local copy has fewer
+  messages than Gmail's count.
+- Attachment bytes are downloaded only when you press SAVE, and inline images only
+  when a message is rendered. Files go under
+  `~/Library/Application Support/Kanban/Gmail/Attachments/<account>` with 0700/0600
+  permissions.
+- Gmail changes are optimistic locally and queued in `gmail_outbox`. The queue is
+  replayed in order when the network returns; repeat draft saves replace the queued
+  draft instead of creating duplicates. A transient failure stops the queue rather
+  than skipping ahead.
+- Sending when offline queues the exact RFC 822 message; it is sent on the next sync.
+- Delete moves a conversation to Gmail Trash. Permanent deletion is not exposed: it
+  needs the full-mailbox `https://mail.google.com/` scope, and Meet deliberately asks
+  only for `gmail.modify` + `gmail.send`. Gmail still auto-purges Trash on its schedule.
+- Rate limits (429/403 quota) and 5xx responses are retried with backoff and
+  `Retry-After`; a 401 refreshes the access token once and retries.
+
+### Live verification checklist
+
+The automated suite uses a fake Gmail API, so a first live run should cover:
+
+1. Create a Google Cloud project, enable Gmail API, configure the consent screen and
+   create a **Desktop app** OAuth client.
+2. Settings → Gmail → Add account. Consent once; confirm the account appears with
+   FILEVAULT ON and a token in the Keychain.
+3. Press SYNC; send yourself a message from another client and confirm it arrives via
+   the History sync. Open a thread and download an attachment.
+4. Send a message from the composer (the confirmation dialog is the only send path).
+   Confirm it appears in Sent and in Gmail.
+5. Revoke the app's access in the Google account security page, press SYNC, and
+   confirm the reconnect error. Reconnect and verify the cache resumes.
+6. Disconnect. Confirm the refresh token is revoked and the account's local messages,
+   drafts and encrypted attachments are gone.
+
+### Reading, search and semantic ranking
+
+Mailboxes: Inbox, Starred, Important, Sent, Drafts, Archive, Spam, Trash, All Mail,
+plus user labels. Threads are stored with message-level labels, unread counts,
+participants and attachment flags. Search understands Gmail-style operators
+(`from:`, `to:`, `subject:`, `label:`, `is:unread`, `has:attachment`, `in:`,
+`newer_than:`), and full message text is indexed with SQLite FTS5.
+
+When the system English sentence embedding is available, an on-device semantic pass
+can add paraphrases that FTS misses. The embedding model and the query run locally
+through `NaturalLanguage`; the index is a vector BLOB in SQLite. No embedding request
+leaves the Mac. Different search results are account-isolated.
+
+HTML bodies are sanitized before display: scripts, styles, iframes, forms, event
+handlers and `javascript:` URLs are removed, remote images are replaced with a
+blocked marker, and a CSP meta tag plus a non-persistent WebView make remote loads
+impossible. Clicking a link opens it in the default browser; the message view itself
+never navigates.
+
+### Composing
+
+The composer is an `NSTextView` rich editor (bold, italic, underline, links, inline
+images) with To/Cc/Bcc, subject, attachments and inline images. It builds a real
+multipart/alternative + related + mixed MIME message with UTF-8 encoded headers,
+base64 bodies, `Message-ID`, `In-Reply-To`, `References` and Gmail thread identity.
+Reply, reply-all and forward prefill recipients, subject and quoted text. Drafts are
+saved locally and pushed to Gmail Drafts; sending is always a separate confirmation.
+
+### Agent
+
+The existing agent console has local mail tools: search ("find the email where we
+discussed pricing"), unread summary, latest conversation with a person, extracted
+commitments ("what did this client promise?"), attention ranking, thread summaries
+and label suggestions. Results are typed, clickable email artifacts that open the real
+thread. Nothing in that path calls a model or a server.
+
+The agent can propose draft creation, labeling, archiving, moving to trash and
+marking read/unread. Every write appears in PROPOSED OPERATIONS and runs only after
+EXECUTE. There is deliberately no send operation: only the composer's SEND button
+(with its confirmation dialog) can send mail. Email content is never added to a
+Gemini prompt.
+
+### Meetings
+
+A meeting page and a scheduled meeting page show related conversations matched on
+participant names and email addresses from the local cache. A meeting can generate a
+follow-up draft from its stored summary, decisions and action items; an upcoming
+meeting can generate an agenda email. Email threads show their related recorded
+meetings, so navigation works in both directions.
+
 ## Meeting action items never become tasks on their own
 
 The analysis extracts action items. They arrive as *suggestions*. You press ADD, adjust the
@@ -229,11 +362,23 @@ recording players, transcript snippets, action items and participant cards — r
 by `AgentArtifactRegistry`. Each card links to the real destination (Open Meeting,
 Open Task, Play Recording, View Transcript) and uses the app's existing routes.
 
-Writes are proposals, not actions. The planner (or a model, when one is configured)
-produces a validated `AgentOperation`; the Mac shows it in PROPOSED OPERATIONS and
-applies it only after EXECUTE. `AgentExecutor` is the single write path, so a typed
-command and a model proposal cannot diverge. Invented ids, unparseable dates and
-ambiguous selectors are dropped or answered with a choice instead of guessed at.
+Create, update, move and complete are real CRUD operations, not suggestions: the
+planner produces a validated `AgentOperation` and the Mac applies it immediately.
+Delete and archive still appear in PROPOSED OPERATIONS and wait for EXECUTE.
+`AgentExecutor` is the single write path, so a typed command and a model proposal
+cannot diverge. Invented ids and ambiguous selectors are dropped or answered with a
+choice instead of guessed at.
+
+Task phrasing carries its own reminder. "Create a todo to call Sarah tomorrow at
+5pm" stores the task with a real 17:00 due time, removes the date phrase from the
+title, applies the write, and arms the local notification for that time. "In 2
+hours", "by friday" and "at 9am" work the same way.
+
+Long prose is delegated to Gemini rather than forced through regexes: "add these
+todos… one is X secondly Y then Z" returns one validated `create_task` per item and
+applies them all. If the streaming reply is unreadable it retries the buffered
+endpoint, and a malformed action is dropped without discarding the rest.
+AUTO-APPLY WRITES in Settings turns the safe-write policy off.
 
 Conversation state lives in `AgentContext`: the last meeting list, the last task list
 and what "it" refers to. That is what makes "show my recent meetings" → "summarize
@@ -244,7 +389,7 @@ only asked after it reports a miss. A bare "the first one" also answers the
 
 Scheduling is local, too. "Schedule a meeting about onboarding with Sarah tomorrow at
 2pm for 45 minutes" becomes a pending `ScheduledMeetingDraft`; EXECUTE writes it to
-the Mac's SQLite store and the Calendar section opens it. Briefs are built from
+the Mac's SQLite store and the MEET section opens it. Briefs are built from
 meetings, action items, decisions and tasks already on the Mac. Optional EventKit
 system-calendar events are read-only and never written by the app.
 
@@ -264,7 +409,8 @@ response: its LangGraph decision loop is not token-streamed.
 | `⌘1`–`⌘4` | focus a column |
 | `⌘⇧1`–`⌘⇧4` | move the selected task |
 | `⌘R` | start / stop recording |
-| `⌘⌥1/2/3` | tasks / meetings / agent |
+| `⌘⇧M` | compose mail |
+| `⌘⌥1`–`⌘⌥5` | tasks / meetings / mail / Meet / agent |
 | `⌘⌥4` | meet (briefs, commitments, memory, automation) |
 | `⌃⌘S` | collapse / expand the navigation drawer |
 | `↑ ↓ ← →` | move the selection |
@@ -282,12 +428,20 @@ xcodebuild -project Kanban.xcodeproj -scheme KanbanTests \
   -destination 'platform=macOS,arch=arm64' test
 ```
 
-200 tests at the time of writing (one fixture generator is skipped unless explicitly enabled): store and migrations, the outbox, the task
-service, wire DTOs, date and quick-add parsing, snapshot generation,
+283 tests at the time of writing (four live transcription tests and the fixture
+generator are skipped unless explicitly enabled): store and migrations, the outbox,
+the task service, wire DTOs, date and quick-add parsing, snapshot generation,
 capture-source reporting, the agent planner/artifact engine, the shared agent
-operation executor, and the local meeting brain: commitment sources and task sync,
+operation executor, the local meeting brain (commitment sources and task sync,
 month-spanning memory search and cited answers, contradiction candidates, brief
-conflicts and free-time suggestions, and local automation rules/drafts.
+conflicts and free-time suggestions, and local automation rules/drafts), plus Gmail
+PKCE/loopback OAuth, MIME parse/build/sanitize, the Gmail cache and account
+isolation, query operators, full-text/pagination, drafts, attachments, history sync
+and fallback, outbox replay, send confirmation, and the email agent
+artifacts/actions, app-level draft/attachment encryption, legacy-file migration,
+the FileVault storage policy, the real Gmail HTTP client (auth header, 401 refresh,
+429 retry, history expiry, attachment decoding, send thread identity), OAuth code
+exchange/refresh/revoke, and token-manager persistence.
 
 `FixtureGenerator` writes `Tests/Fixtures/*.json` from the real encoders, but only
 when `KANBAN_WRITE_FIXTURES=1` is set — otherwise a test run would rewrite tracked

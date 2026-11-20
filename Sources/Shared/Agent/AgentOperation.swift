@@ -13,6 +13,11 @@ public struct AgentOperation: Identifiable, Equatable, Sendable {
         case completeTask = "complete_task"
         case archiveTask = "archive_task"
         case deleteTask = "delete_task"
+        case createEmailDraft = "create_email_draft"
+        case labelEmail = "label_email"
+        case archiveEmail = "archive_email"
+        case trashEmail = "trash_email"
+        case markEmailRead = "mark_email_read"
     }
 
     public var id: String
@@ -27,11 +32,22 @@ public struct AgentOperation: Identifiable, Equatable, Sendable {
     public var due: String?
     public var tags: [String]?
     public var summary: String
+    /// Mail writes carry their own target and payload. Sending is deliberately not
+    /// a kind: the agent can draft, never send.
+    public var emailAccountID: UUID?
+    public var emailThreadIDs: [String]?
+    public var emailLabels: [String]?
+    public var emailRead: Bool?
+    public var emailAddLabel: Bool?
+    public var emailDraft: GmailDraft?
 
     public init(id: String = UUID().uuidString, kind: Kind, taskID: UUID? = nil,
                 title: String? = nil, notes: String? = nil, status: TaskStatus? = nil,
                 priority: Priority? = nil, due: String? = nil, tags: [String]? = nil,
-                summary: String) {
+                summary: String, emailAccountID: UUID? = nil,
+                emailThreadIDs: [String]? = nil, emailLabels: [String]? = nil,
+                emailRead: Bool? = nil, emailAddLabel: Bool? = nil,
+                emailDraft: GmailDraft? = nil) {
         self.id = id
         self.kind = kind
         self.taskID = taskID
@@ -42,9 +58,37 @@ public struct AgentOperation: Identifiable, Equatable, Sendable {
         self.due = due
         self.tags = tags
         self.summary = summary
+        self.emailAccountID = emailAccountID
+        self.emailThreadIDs = emailThreadIDs
+        self.emailLabels = emailLabels
+        self.emailRead = emailRead
+        self.emailAddLabel = emailAddLabel
+        self.emailDraft = emailDraft
     }
 
-    public var destructive: Bool { kind == .archiveTask || kind == .deleteTask }
+    public var destructive: Bool {
+        kind == .archiveTask || kind == .deleteTask || kind == .trashEmail
+    }
+
+    /// Board writes that can be applied immediately without a second confirmation.
+    /// Archive and delete stay proposals; mail writes stay proposals.
+    public var isSafeLocalWrite: Bool {
+        switch kind {
+        case .createTask, .updateTask, .moveTask, .completeTask:
+            return true
+        default:
+            return false
+        }
+    }
+
+    public var isEmailOperation: Bool {
+        switch kind {
+        case .createEmailDraft, .labelEmail, .archiveEmail, .trashEmail, .markEmailRead:
+            return true
+        default:
+            return false
+        }
+    }
 
     /// The card shown in PROPOSED OPERATIONS.
     public var action: AgentAction {
@@ -101,6 +145,66 @@ public struct AgentOperation: Identifiable, Equatable, Sendable {
     public static func delete(_ task: TaskItem) -> AgentOperation {
         AgentOperation(kind: .deleteTask, taskID: task.id,
                        summary: "DELETE · \(task.title)")
+    }
+
+    // MARK: Mail factories
+
+    public static func createDraft(_ draft: GmailDraft, accountEmail: String) -> AgentOperation {
+        let recipients = draft.to.map(\.displayName).joined(separator: ", ")
+        var summary = "DRAFT EMAIL · \(draft.subject.isEmpty ? "(no subject)" : draft.subject)"
+        summary += "\nFROM \(accountEmail)"
+        if !recipients.isEmpty { summary += " · TO \(recipients)" }
+        if !draft.bodyText.isEmpty { summary += "\n" + AgentText.brief(draft.bodyText, 120) }
+        return AgentOperation(kind: .createEmailDraft, summary: summary,
+                              emailAccountID: draft.accountID, emailDraft: draft)
+    }
+
+    public static func emailLabels(_ threads: [GmailThreadSummary], labels: [String],
+                                   add: Bool, accountEmail: String) -> AgentOperation? {
+        guard let first = threads.first else { return nil }
+        let verb = add ? "LABEL" : "UNLABEL"
+        let names = labels.joined(separator: ", ")
+        var summary = "\(verb) EMAIL · \(names)"
+        summary += "\n\(threads.count) conversation\(threads.count == 1 ? "" : "s") · \(accountEmail)"
+        if let subject = threads.first?.displaySubject {
+            summary += "\n\(subject)"
+            if threads.count > 1 { summary += " +\(threads.count - 1) more" }
+        }
+        return AgentOperation(kind: .labelEmail, summary: summary,
+                              emailAccountID: first.accountID,
+                              emailThreadIDs: threads.map(\.id),
+                              emailLabels: labels, emailAddLabel: add)
+    }
+
+    public static func archiveEmail(_ threads: [GmailThreadSummary],
+                                    accountEmail: String) -> AgentOperation? {
+        guard let first = threads.first else { return nil }
+        var summary = "ARCHIVE EMAIL · \(threads.count) conversation\(threads.count == 1 ? "" : "s")"
+        summary += "\n\(first.displaySubject)"
+        summary += "\n\(accountEmail)"
+        return AgentOperation(kind: .archiveEmail, summary: summary,
+                              emailAccountID: first.accountID,
+                              emailThreadIDs: threads.map(\.id))
+    }
+
+    public static func trashEmail(_ threads: [GmailThreadSummary],
+                                  accountEmail: String) -> AgentOperation? {
+        guard let first = threads.first else { return nil }
+        var summary = "TRASH EMAIL · \(threads.count) conversation\(threads.count == 1 ? "" : "s")"
+        summary += "\n\(first.displaySubject)"
+        summary += "\n\(accountEmail)"
+        return AgentOperation(kind: .trashEmail, summary: summary,
+                              emailAccountID: first.accountID,
+                              emailThreadIDs: threads.map(\.id))
+    }
+
+    public static func markEmailRead(_ threads: [GmailThreadSummary], read: Bool,
+                                     accountEmail: String) -> AgentOperation? {
+        guard let first = threads.first else { return nil }
+        let summary = "MARK \(read ? "READ" : "UNREAD") · \(threads.count) conversation\(threads.count == 1 ? "" : "s")\n\(accountEmail)"
+        return AgentOperation(kind: .markEmailRead, summary: summary,
+                              emailAccountID: first.accountID,
+                              emailThreadIDs: threads.map(\.id), emailRead: read)
     }
 }
 

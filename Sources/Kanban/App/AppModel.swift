@@ -8,13 +8,14 @@ import WidgetKit
 @MainActor
 final class AppModel {
 
-    /// Top-level navigation. Three sections, nothing more.
+    /// Top-level navigation.
     enum Section: String, CaseIterable, Hashable {
-        case tasks, meetings, agent, calendar
+        case tasks, meetings, mail, calendar, agent
         var label: String {
             switch self {
             case .tasks: return "TASKS"
             case .meetings: return "MEETINGS"
+            case .mail: return "MAIL"
             case .calendar: return "MEET"
             case .agent: return "AGENT"
             }
@@ -47,6 +48,13 @@ final class AppModel {
     let models: ModelDownloader
     let dictation: DictationController
     let agent: AgentSession
+    /// Gmail, entirely on this Mac. The factory talks only to Google and SQLite.
+    let gmailStore: GmailStore
+    let gmailFactory: GmailLiveAPIFactory
+    let gmailSync: GmailSyncEngine
+    let gmailService: GmailService
+    let gmailAuth: GmailAuthController
+    let mail: MailModel
     /// Read-only Google/Outlook calendars via the accounts macOS already has.
     let calendar = CalendarBridge()
     /// Last computed pre-meeting briefs, keyed by scheduled meeting id.
@@ -136,7 +144,52 @@ final class AppModel {
                                           engine: transcription, catalog: catalog)
         self.dictation = DictationController(settings: settings, engine: transcription,
                                              catalog: catalog)
+        // Gmail is a purely local subsystem. The factory reads Google only; the
+        // store, drafts and search all live in this Mac's SQLite file.
+        let gmailStore = GmailStore()
+        // Do not touch the Keychain during app init: a missing ACL entry can put a
+        // modal prompt on screen before the window exists. The secret is added by
+        // MailModel.syncNow/connect on the main actor, just before it is needed.
+        let gmailConfig = GmailOAuthConfig(clientID: settings.gmailClientID,
+                                           clientSecret: nil)
+        let gmailFactory = GmailLiveAPIFactory(config: { gmailConfig })
+        let gmailSync = GmailSyncEngine(
+            store: gmailStore, factory: gmailFactory,
+            initialLimit: { max(50, min(5_000, settings.gmailInitialSyncLimit)) })
+        let gmailService = GmailService(store: gmailStore, sync: gmailSync,
+                                        factory: gmailFactory)
+        let gmailAuth = GmailAuthController()
+        #if DEBUG
+        let fileVault: FileVaultChecking = {
+            if let raw = ProcessInfo.processInfo.environment["KANBAN_ASSUME_FILEVAULT"],
+               let state = FileVaultState(rawValue: raw) {
+                return StaticFileVault(state)
+            }
+            return SystemFileVault()
+        }()
+        #else
+        let fileVault: FileVaultChecking = SystemFileVault()
+        #endif
+        let mail = MailModel(store: gmailStore, sync: gmailSync, service: gmailService,
+                             auth: gmailAuth, factory: gmailFactory, settings: settings,
+                             fileVault: fileVault)
+        gmailSync.setSemanticIndexer { [weak gmailStore] in
+            guard settings.gmailSemanticSearch, let gmailStore else { return }
+            await GmailSemanticIndex.indexPending(store: gmailStore, limit: 200)
+        }
+        self.gmailStore = gmailStore
+        self.gmailFactory = gmailFactory
+        self.gmailSync = gmailSync
+        self.gmailService = gmailService
+        self.gmailAuth = gmailAuth
+        self.mail = mail
+
         self.agent = AgentSession(store: store, client: client, settings: settings, sync: sync)
+        mail.onThreadSelected = { [weak self] accountID, threadID in
+            self?.agent.focusEmail(accountID: accountID, threadID: threadID)
+        }
+        self.agent.gmail = gmailStore
+        self.agent.gmailActions = gmailService
         self.agent.onNavigate = { [weak self] navigation in
             self?.navigate(navigation)
         }
@@ -145,6 +198,12 @@ final class AppModel {
         }
         self.agent.externalScheduledMeetings = { [weak self] in
             self?.calendar.events.map(\.scheduledMeeting) ?? []
+        }
+        self.agent.onEmailChanged = { [weak self] _ in
+            guard let self else { return }
+            self.flash("AGENT UPDATED YOUR MAIL")
+            self.mail.reload(reset: true)
+            self.mail.refreshThread()
         }
 
         store.onChange = { [weak self] _ in
@@ -181,6 +240,31 @@ final class AppModel {
                 self.notifications.notifyAgentAction(count: applied)
             }
         }
+        agent.onReminderScheduled = { [weak self] in
+            guard let self else { return }
+            let arm = { [weak self] in
+                guard let self else { return }
+                self.notifications.reschedule(for: self.store.tasks, enabled: true)
+                self.notifications.rescheduleCommitments(
+                    self.store.meetings.flatMap { meeting in
+                        meeting.actionItems.map { (item: $0, meeting: meeting) }
+                    },
+                    enabled: true)
+                self.flash("REMINDER SET")
+            }
+            if self.settings.notificationsEnabled {
+                arm()
+            } else {
+                self.notifications.requestAuthorisation { granted in
+                    guard granted else {
+                        self.flash("NOTIFICATIONS OFF · REMINDER NOT ARMED")
+                        return
+                    }
+                    self.settings.notificationsEnabled = true
+                    arm()
+                }
+            }
+        }
     }
 
     var theme: Theme {
@@ -206,6 +290,7 @@ final class AppModel {
         #endif
         store.flush()
         if settings.dictationEnabled { dictation.setEnabled(true) }
+        mail.start()
         #if DEBUG
         ScreenshotDriver.runIfRequested(self)
         #endif
@@ -244,6 +329,7 @@ final class AppModel {
         Task {
             if calendar.isAuthorized { await refreshCalendar() }
             sweepCommitments()
+            await mail.syncIfStale()
         }
         guard settings.backendIsConfigured else { return }
         Task {
@@ -550,10 +636,50 @@ final class AppModel {
             openInspector(for: id)
         case .calendar(let id):
             openCalendar(id)
+        case .mail(let accountID, let threadID):
+            if threadID == nil { mail.setMailbox(.inbox) }
+            openMail(accountID: accountID, threadID: threadID)
+        case .mailDraft(let id):
+            openMailDraft(id)
         case .recorder:
             section = .meetings
         case .board:
             section = .tasks
+        }
+    }
+
+    /// The one route into the mail workspace. A meeting or agent card calls this
+    /// with the same arguments a click in the sidebar would.
+    func openMail(accountID: UUID? = nil, threadID: String? = nil) {
+        section = .mail
+        if let accountID {
+            mail.setAccount(accountID)
+        }
+        if let threadID {
+            let account = accountID ?? mail.selectedAccountID ?? mail.store.accounts.first?.id
+            if let account {
+                mail.select(accountID: account, threadID: threadID)
+            }
+        }
+    }
+
+    func openMailDraft(_ id: UUID) {
+        section = .mail
+        mail.mailbox = .drafts
+        if let draft = mail.store.draft(id) {
+            mail.setAccount(draft.accountID)
+            Task { await mail.editDraft(draft) }
+        } else {
+            mail.reload(reset: true)
+        }
+    }
+
+    func composeMail() {
+        section = .mail
+        if mail.isStorageBlocked {
+            flash("MAIL LOCKED · FILEVAULT REQUIRED")
+        } else {
+            mail.composeNew()
         }
     }
 

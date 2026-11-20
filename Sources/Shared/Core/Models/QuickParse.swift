@@ -25,7 +25,13 @@ enum QuickParse {
         var titleWords: [String] = []
         var result = Result(title: "")
 
-        for token in input.split(separator: " ", omittingEmptySubsequences: true) {
+        // "Call Sarah tomorrow at 5pm" is a task with a time, not a title containing
+        // the words "tomorrow at 5pm". Explicit @date markers still win below.
+        let natural = NaturalDate.extract(from: input, now: now)
+        result.due = natural?.due
+        let working = natural?.text ?? input
+
+        for token in working.split(separator: " ", omittingEmptySubsequences: true) {
             let word = String(token)
             guard let marker = word.first, word.count > 1 else {
                 titleWords.append(word)
